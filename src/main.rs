@@ -1,4 +1,5 @@
 mod alternatives;
+mod approval;
 mod bundle;
 mod daily;
 mod delivery;
@@ -6,6 +7,7 @@ mod engine;
 mod handoff;
 mod input_scope;
 mod learning;
+mod mcp;
 mod policy;
 mod quality;
 mod queue;
@@ -18,6 +20,7 @@ mod stage_context;
 mod storage;
 mod transfer;
 mod update;
+mod upgrade;
 mod workflow;
 mod workspace;
 
@@ -29,35 +32,74 @@ use std::{
     process::ExitCode,
 };
 use storage::{LockedRun, State, live_hash};
-use workspace::{PROGRESS, Plan, Workspace, file, names, read_brief};
+use workspace::{
+    PROGRESS, Plan, Workspace, file, invocation, names, read_brief, run_invocation, shell_word,
+};
 
 #[derive(Parser)]
 #[command(version, about = "Manage a local AnyDock workspace")]
 struct Cli {
+    /// Start in this directory before discovering the workspace.
+    #[arg(short = 'C', long, value_name = "DIRECTORY")]
+    directory: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Set up the current folder as an idle AnyDock workspace.
+    #[command(display_order = 1)]
+    Init,
+    /// Verify workspace compatibility or bring an older local layout forward in place.
+    #[command(display_order = 17)]
+    Upgrade {
+        #[arg(long)]
+        check: bool,
+        /// Filename of the previous workspace's version marker.
+        #[arg(long)]
+        from_marker: Option<String>,
+        /// Backup directory outside the workspace. Defaults to a sibling folder.
+        #[arg(long, requires = "from_marker", conflicts_with = "check")]
+        backup: Option<PathBuf>,
+    },
     /// Write the opt-in local Markdown brief from saved feeds and run records.
+    #[command(display_order = 20)]
     Daily {
         /// Set up a feed from a folder. Repeat for each initial feed.
         #[arg(long, value_name = "NAME=FOLDER")]
         feed: Vec<String>,
+        /// Add a new feed to an existing configuration. Repeat for additional feeds.
+        #[arg(long, value_name = "NAME=FOLDER", conflicts_with = "feed")]
+        add_feed: Vec<String>,
+        /// Remove a feed by name. The producer's files and existing snapshots stay available.
+        #[arg(long, value_name = "NAME", conflicts_with = "feed")]
+        remove_feed: Vec<String>,
     },
     /// Validate this workspace and its run and workflow definitions.
+    #[command(display_order = 16)]
     Check,
     /// Process local CLI requests over standard input.
+    #[command(hide = true)]
     Session,
+    /// Serve one workspace over local MCP stdio.
+    Mcp {
+        /// Expose authorized work transitions in addition to read-only tools.
+        #[arg(long)]
+        allow_work: bool,
+    },
     /// Register a run with an existing brief and stage definitions.
+    #[command(display_order = 3)]
     Start {
         run: String,
         /// Copy definitions from this saved workflow before registering.
         #[arg(long)]
         workflow: Option<String>,
     },
+    /// Register an agent-only run, preserving its progress as an editable note.
+    Adopt { run: String },
     /// Begin or resume the first unresolved stage.
+    #[command(display_order = 4)]
     Next {
         run: String,
         /// Open a new attempt after inspecting an interruption or stale result.
@@ -68,12 +110,14 @@ enum Command {
         context: bool,
     },
     /// Print the selected JSON values from a stage's external input.
+    #[command(hide = true)]
     Input {
         run: String,
         stage: String,
         path: String,
     },
     /// Register and begin a single-stage task from an explicit brief and inputs.
+    #[command(name = "run", visible_alias = "quick", display_order = 2)]
     Quick {
         run: String,
         #[arg(long)]
@@ -82,12 +126,16 @@ enum Command {
         work: String,
         #[arg(long)]
         input: Vec<String>,
+        /// Snapshot a selected local file without moving or editing the original.
+        #[arg(long, value_name = "FILE")]
+        source: Vec<PathBuf>,
         #[arg(long)]
         output: String,
         #[arg(long)]
         review: Option<String>,
     },
     /// Record the required handoff from the current attempt.
+    #[command(display_order = 5)]
     Complete {
         run: String,
         stage: String,
@@ -98,6 +146,7 @@ enum Command {
         quiet: bool,
     },
     /// List current recurring tasks and their next actions without changing state.
+    #[command(display_order = 13)]
     Queue {
         /// Include completed current runs.
         #[arg(long)]
@@ -110,32 +159,20 @@ enum Command {
         sources: bool,
     },
     /// Show current status and the next action. Omit RUN to see all runs.
+    #[command(display_order = 6)]
     Status {
         run: Option<String>,
-        /// Inspect files and state without recording revisions or acquiring a write lock.
-        #[arg(long)]
+        /// Record observed edits before showing status.
+        #[arg(long, conflicts_with = "inspect")]
+        reconcile: bool,
+        #[arg(long, hide = true)]
         inspect: bool,
         /// Show a bounded preview of unrecorded changes for the selected run.
-        #[arg(long, requires_all = ["inspect", "run"])]
+        #[arg(long, requires = "run", conflicts_with = "reconcile")]
         diff: bool,
     },
-    /// Record the human’s decision to change a registered review requirement.
-    AuthorizeReviewChange {
-        run: String,
-        stage: String,
-        #[arg(long)]
-        change: String,
-    },
-    /// Record the human's approval of a specific handoff revision.
-    Approve {
-        run: String,
-        stage: String,
-        #[arg(long)]
-        revision: String,
-        /// Interpret RUN as a recurring task name.
-        #[arg(long)]
-        task: bool,
-    },
+    #[command(flatten)]
+    Review(ReviewCommand),
     /// List archived revisions and the saved copies of their outputs.
     History { run: String, stage: String },
     /// Compare the current recorded handoff with the prior reviewed revision.
@@ -167,8 +204,15 @@ enum Command {
         stage: String,
         #[arg(long)]
         workflow: String,
+        #[arg(
+            long,
+            required_unless_present = "from_rejection",
+            conflicts_with = "from_rejection"
+        )]
+        rule: Option<String>,
+        /// Reuse the most recent changes-requested note after the revised output is approved.
         #[arg(long)]
-        rule: String,
+        from_rejection: bool,
         #[arg(long)]
         confirm: Option<String>,
     },
@@ -177,30 +221,6 @@ enum Command {
         name: String,
         #[arg(long)]
         from: String,
-    },
-    /// Group independent review gates for this run and its updates.
-    BatchReview { run: String },
-    /// Approve the exact revision group presented by review.
-    ApproveBatch {
-        run: String,
-        #[arg(long)]
-        revision: String,
-        /// Interpret RUN as a recurring task name.
-        #[arg(long)]
-        task: bool,
-    },
-    /// Show the active decision, previous approved diff, and exact revision.
-    Review {
-        run: String,
-        /// Compare with an exact previously shown batch.
-        #[arg(long)]
-        since: Option<String>,
-        /// Use the retained comparison after the reviewer has seen the earlier batch.
-        #[arg(long, conflicts_with = "since")]
-        retained: bool,
-        /// Interpret RUN as a recurring task name.
-        #[arg(long)]
-        task: bool,
     },
     /// Save a run's stage definitions as a reusable workflow.
     SaveWorkflow { run: String, name: String },
@@ -247,13 +267,85 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum ReviewCommand {
+    /// Record the human’s decision to change a registered review requirement.
+    #[command(hide = true)]
+    AuthorizeReviewChange {
+        run: String,
+        stage: String,
+        #[arg(long)]
+        change: String,
+    },
+    /// Record the human's approval of a specific handoff revision.
+    #[command(display_order = 9)]
+    Approve {
+        run: String,
+        stage: String,
+        #[arg(long)]
+        revision: String,
+        /// Interpret RUN as a recurring task name.
+        #[arg(long)]
+        task: bool,
+    },
+    /// Request changes on an exact pending stage revision and keep its prior draft.
+    #[command(display_order = 11)]
+    Reject {
+        run: String,
+        stage: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        note: String,
+        #[arg(long)]
+        task: bool,
+    },
+    /// Group independent review gates for this run and its updates.
+    #[command(hide = true)]
+    BatchReview { run: String },
+    /// Approve the exact revision group presented by review.
+    #[command(display_order = 10)]
+    ApproveBatch {
+        run: String,
+        #[arg(long)]
+        revision: String,
+        /// Interpret RUN as a recurring task name.
+        #[arg(long)]
+        task: bool,
+    },
+    /// Show the active decision, previous approved diff, and exact revision.
+    #[command(display_order = 8)]
+    Review {
+        run: String,
+        /// Compare with an exact previously shown batch.
+        #[arg(long)]
+        since: Option<String>,
+        /// Use the retained comparison after the reviewer has seen the earlier batch.
+        #[arg(long, conflicts_with = "since")]
+        retained: bool,
+        /// Interpret RUN as a recurring task name.
+        #[arg(long)]
+        task: bool,
+        /// Review and choose a decision in this terminal.
+        #[arg(long)]
+        interactive: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum RecurringCommand {
     /// Start and track the first run of a recurring task.
     Begin {
         name: String,
         /// Read stage definitions from this JSON file under inbox/.
+        #[arg(
+            long,
+            required_unless_present = "workflow",
+            conflicts_with = "workflow"
+        )]
+        definition: Option<String>,
+        /// Use a saved workflow and its approved guidance for future submissions.
         #[arg(long)]
-        definition: String,
+        workflow: Option<String>,
         #[arg(long)]
         brief: String,
         /// Use a complete, exact-name input set from inbox/ or a subfolder.
@@ -267,6 +359,7 @@ enum RecurringCommand {
         batch_review: bool,
     },
     /// Resume a named recurring task or submit its next complete input packet.
+    #[command(display_order = 12)]
     Refresh {
         name: String,
         /// Attach the task to an existing completed run.
@@ -296,24 +389,28 @@ enum RecurringCommand {
 #[derive(Subcommand)]
 enum TransferCommand {
     /// Read the current task and safe next action from any agent harness.
+    #[command(display_order = 7)]
     Handoff {
         run: String,
         #[arg(long)]
         json: bool,
     },
     /// Create a one-time bootstrap for a receiving agent.
+    #[command(hide = true)]
     Offer {
         run: String,
         #[arg(long)]
         attempt: Option<u64>,
     },
     /// Claim a handoff and fence the previous attempt if one was active.
+    #[command(hide = true)]
     Claim {
         run: String,
         #[arg(long)]
         ticket: String,
     },
     /// Launch a local harness with a one-time bootstrap as one argument.
+    #[command(hide = true)]
     Switch {
         run: String,
         #[arg(long)]
@@ -342,11 +439,7 @@ enum TransferCommand {
 }
 
 fn main() -> ExitCode {
-    let result = match Cli::parse().command {
-        Command::Session => Workspace::open().and_then(|_| session::serve()),
-        command => dispatch(command),
-    };
-    match result {
+    match execute(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("anydock: {err:#}");
@@ -355,14 +448,38 @@ fn main() -> ExitCode {
     }
 }
 
-fn dispatch(command: Command) -> Result<()> {
-    let space = Workspace::open()?;
+fn execute(cli: Cli) -> Result<()> {
+    let start = cli.directory.map_or_else(std::env::current_dir, Ok)?;
+    let command = match cli.command {
+        Command::Init => return Workspace::init(&start),
+        Command::Upgrade {
+            check,
+            from_marker,
+            backup,
+        } => return upgrade::run(&start, from_marker.as_deref(), backup.as_deref(), check),
+        command => command,
+    };
+    let space = Workspace::open(&start)?;
     match command {
-        Command::Check => check(&space),
-        Command::Daily { feed } => daily::write(&space, &feed),
-        Command::Queue { all, json, sources } => queue::show(&space, all, json, sources),
-        Command::Session => unreachable!("sessions are opened by the CLI entry point"),
-        Command::Transfer(transfer) => dispatch_transfer(&space, transfer),
+        Command::Session => session::serve(&space),
+        Command::Mcp { allow_work } => mcp::serve(&space, allow_work),
+        command => dispatch(&space, command),
+    }
+}
+
+fn dispatch(space: &Workspace, command: Command) -> Result<()> {
+    match command {
+        Command::Check => check(space),
+        Command::Daily {
+            feed,
+            add_feed,
+            remove_feed,
+        } => daily::write(space, &feed, &add_feed, &remove_feed),
+        Command::Queue { all, json, sources } => queue::show(space, all, json, sources),
+        Command::Init | Command::Upgrade { .. } | Command::Session | Command::Mcp { .. } => {
+            unreachable!("handled by the CLI entry point")
+        }
+        Command::Transfer(transfer) => dispatch_transfer(space, transfer),
         Command::Update {
             from,
             run,
@@ -370,9 +487,9 @@ fn dispatch(command: Command) -> Result<()> {
             inbox,
             pending,
             since,
-        } => with_run(&space, &from, |path, _, state| {
+        } => with_run(space, &from, |path, _, state| {
             update::create(
-                &space,
+                space,
                 path,
                 state,
                 update::Request {
@@ -393,19 +510,28 @@ fn dispatch(command: Command) -> Result<()> {
         Command::Recurring(RecurringCommand::Begin {
             name,
             definition,
+            workflow,
             brief,
             inbox,
             source,
             batch_review,
         }) => recurring::begin(
-            &space,
+            space,
             &name,
-            &definition,
+            match (definition.as_deref(), workflow.as_deref()) {
+                (Some(path), None) => recurring::Definition::Inbox(path),
+                (None, Some(name)) => recurring::Definition::Saved(name),
+                _ => unreachable!("clap requires exactly one definition source"),
+            },
             &brief,
-            source.as_deref().map_or(
-                update::InputSelection::Inbox(inbox.as_deref().unwrap_or("inbox")),
-                update::InputSelection::Source,
-            ),
+            source
+                .as_ref()
+                .map(|path| space.start.join(path))
+                .as_deref()
+                .map_or(
+                    update::InputSelection::Inbox(inbox.as_deref().unwrap_or("inbox")),
+                    update::InputSelection::Source,
+                ),
             batch_review,
         ),
         Command::Recurring(RecurringCommand::Refresh {
@@ -418,7 +544,7 @@ fn dispatch(command: Command) -> Result<()> {
             pending,
             since,
         }) => recurring::run(
-            &space,
+            space,
             recurring::Request {
                 name: &name,
                 from: from.as_deref(),
@@ -434,10 +560,10 @@ fn dispatch(command: Command) -> Result<()> {
                 since: since.as_deref(),
             },
         ),
-        Command::Fork { run, alternative } => with_run(&space, &run, |path, _, state| {
-            alternatives::fork(&space, path, &run, &alternative, state)
+        Command::Fork { run, alternative } => with_run(space, &run, |path, _, state| {
+            alternatives::fork(space, path, &run, &alternative, state)
         }),
-        Command::Compare { left, right } => alternatives::compare(&space, &left, &right),
+        Command::Compare { left, right } => alternatives::compare(space, &left, &right),
         Command::Delivery {
             run,
             name,
@@ -454,7 +580,7 @@ fn dispatch(command: Command) -> Result<()> {
                 confirm: confirm.as_deref(),
             };
             if confirm.is_some() {
-                with_run(&space, &run, |path, _, state| {
+                with_run(space, &run, |path, _, state| {
                     delivery::run(path, &run, state, options)
                 })
             } else {
@@ -463,8 +589,14 @@ fn dispatch(command: Command) -> Result<()> {
                 delivery::run(&path, &run, &mut state, options)
             }
         }
-        Command::Start { run, workflow } => start(&space, &run, workflow.as_deref()),
-        Command::Status { run, inspect, diff } => {
+        Command::Start { run, workflow } => start(space, &run, workflow.as_deref(), false),
+        Command::Adopt { run } => start(space, &run, None, true),
+        Command::Status {
+            run,
+            reconcile,
+            diff,
+            ..
+        } => {
             let runs = match run {
                 Some(id) => vec![id],
                 None => names(&space.root, "runs")?,
@@ -474,7 +606,7 @@ fn dispatch(command: Command) -> Result<()> {
             }
             let mut errors = 0;
             for run in &runs {
-                if let Err(err) = status(&space, run, inspect, diff) {
+                if let Err(err) = status(space, run, !reconcile, diff) {
                     errors += 1;
                     println!("Run {run} | unavailable: {err:#}");
                 }
@@ -487,15 +619,17 @@ fn dispatch(command: Command) -> Result<()> {
             brief,
             work,
             input,
+            source,
             output,
             review,
         } => quick::create(
-            &space,
+            space,
             quick::Request {
                 run: &run,
                 brief: &brief,
                 work: &work,
                 input: &input,
+                sources: &source,
                 output: &output,
                 review: review.as_deref(),
             },
@@ -513,9 +647,14 @@ fn dispatch(command: Command) -> Result<()> {
                 .input_fields
                 .get(&path)
                 .with_context(|| format!("{path} has no selected JSON fields in {stage}"))?;
-            let data = input_scope::read(&root, &path, fields)?
+            let state = LockedRun::inspect(&root)?;
+            let format = state.as_ref().map_or_else(
+                || item.fields.input_value_format.unwrap_or_default(),
+                |state| state.input_format(item),
+            );
+            let data = input_scope::read(&root, &path, fields, format)?
                 .with_context(|| format!("missing input {path}"))?;
-            if let Some(state) = LockedRun::inspect(&root)?
+            if let Some(state) = state
                 && let Some(attempt) = state
                     .stages
                     .get(&stage)
@@ -541,7 +680,8 @@ fn dispatch(command: Command) -> Result<()> {
             run,
             retry,
             context,
-        } => with_run(&space, &run, |path, lock, state| {
+        } => with_run(space, &run, |path, lock, state| {
+            let command = invocation(&space.root);
             let plan = Plan::load(path)?;
             let view = refresh(path, lock, &plan, state)?;
             if let Some(item) = view.action(state.batch_review) {
@@ -551,6 +691,9 @@ fn dispatch(command: Command) -> Result<()> {
                     lock.save(state)?;
                 }
                 println!("Stage {} | attempt {attempt}", item.stage.id);
+                for reason in &item.reasons {
+                    println!("{reason}");
+                }
                 println!("Contract: runs/{run}/{}", item.stage.contract_path());
                 for name in item
                     .basis
@@ -560,8 +703,9 @@ fn dispatch(command: Command) -> Result<()> {
                 {
                     if item.stage.fields.input_fields.contains_key(name) {
                         println!(
-                            "Read selected values: anydock input {run} {} {name}",
-                            item.stage.id
+                            "Read selected values: {command} input {run} {} {}",
+                            item.stage.id,
+                            shell_word(name)
                         );
                     } else if !name.starts_with("references/") {
                         println!("Read: runs/{run}/{name}");
@@ -580,10 +724,16 @@ fn dispatch(command: Command) -> Result<()> {
                     println!("Human review: {decision}");
                 }
                 if context {
-                    stage_context::show(path, &run, &plan, item.stage)?;
+                    stage_context::show(
+                        path,
+                        &run,
+                        &plan,
+                        item.stage,
+                        state.input_format(item.stage),
+                    )?;
                 }
                 println!(
-                    "After writing and verifying the handoff: anydock complete {run} {} --attempt {attempt}",
+                    "After writing and verifying the handoff: {command} complete {run} {} --attempt {attempt}",
                     item.stage.id
                 );
             } else {
@@ -596,30 +746,11 @@ fn dispatch(command: Command) -> Result<()> {
             stage,
             attempt,
             quiet,
-        } => with_run(&space, &run, |path, lock, state| {
+        } => with_run(space, &run, |path, lock, state| {
             complete(path, lock, state, &run, &stage, attempt, quiet)
         }),
-        Command::Approve {
-            run,
-            stage,
-            revision,
-            task,
-        } => with_review_target(&space, &run, task, |target, path, lock, state| {
-            approve(path, lock, state, target.run, &stage, &revision)
-        }),
-        Command::AuthorizeReviewChange { run, stage, change } => {
-            with_run(&space, &run, |path, lock, state| {
-                let plan = Plan::load(path)?;
-                state.verify_archives(path, false)?;
-                policy::authorize(state, &plan, &stage, &change)?;
-                lock.save(state)?;
-                println!(
-                    "Recorded the review policy change for {stage}. Use anydock status {run}."
-                );
-                Ok(())
-            })
-        }
-        Command::History { run, stage } => with_run(&space, &run, |path, _, state| {
+        Command::Review(review) => dispatch_review(space, review),
+        Command::History { run, stage } => with_run(space, &run, |path, _, state| {
             let entry = state.stages.get(&stage).context("no archived stage")?;
             ensure!(!entry.revisions.is_empty(), "no archived revisions");
             for id in entry.ordered_ids()? {
@@ -660,7 +791,7 @@ fn dispatch(command: Command) -> Result<()> {
             revision,
             output,
             to,
-        } => with_run(&space, &run, |path, _, state| {
+        } => with_run(space, &run, |path, _, state| {
             review::restore(
                 path,
                 state.stages.get(&stage).context("no archived stage")?,
@@ -674,29 +805,134 @@ fn dispatch(command: Command) -> Result<()> {
             run,
             brief,
             input,
-        } => quick::repeat(&space, &workflow, &run, &brief, &input),
+        } => quick::repeat(space, &workflow, &run, &brief, &input),
         Command::Learn {
             run,
             stage,
             workflow,
             rule,
+            from_rejection: _,
             confirm,
-        } => with_run(&space, &run, |path, _, state| {
+        } => with_run(space, &run, |path, _, state| {
             learning::save(
-                &space,
+                space,
                 path,
                 state,
                 learning::Request {
                     run: &run,
                     stage: &stage,
                     workflow: &workflow,
-                    rule: &rule,
+                    rule: rule.as_deref(),
                     confirm: confirm.as_deref(),
                 },
             )
         }),
-        Command::Define { name, from } => workflow::define(&space, &name, &from),
-        Command::BatchReview { run } => with_run(&space, &run, |_, lock, state| {
+        Command::Define { name, from } => workflow::define(space, &name, &from),
+        Command::SaveWorkflow { run, name } => workflow::save(space, &run, &name),
+        Command::AdoptReference { run, path: name } => with_run(space, &run, |path, _, state| {
+            let plan = Plan::load(path)?;
+            policy::require_current(state, &plan)?;
+            state.verify_archives(path, false)?;
+            let workflow = state
+                .workflow
+                .as_deref()
+                .context("this run has no saved workflow")?;
+            workflow::adopt_reference(space, path, &plan, workflow, &name)?;
+            println!(
+                "Pinned {name}. Use {} status {run} to see affected stages.",
+                invocation(&space.root)
+            );
+            Ok(())
+        }),
+    }
+}
+
+fn dispatch_review(space: &Workspace, command: ReviewCommand) -> Result<()> {
+    match command {
+        ReviewCommand::Approve {
+            run,
+            stage,
+            revision,
+            task,
+        } => {
+            let terminal = approval::configured_terminal(space)?;
+            with_review_target(space, &run, task, |target, path, lock, state| {
+                approve(
+                    path,
+                    lock,
+                    state,
+                    StageDecision {
+                        run: target.run,
+                        stage: &stage,
+                        revision: &revision,
+                    },
+                    terminal,
+                )
+            })
+        }
+        ReviewCommand::Reject {
+            run,
+            stage,
+            revision,
+            note,
+            task,
+        } => {
+            ensure!(
+                review::valid_note(&note),
+                "provide one line of feedback, up to 1024 UTF-8 bytes"
+            );
+            let terminal = approval::configured_terminal(space)?;
+            with_review_target(space, &run, task, |target, path, lock, state| {
+                reject(
+                    path,
+                    lock,
+                    state,
+                    StageDecision {
+                        run: target.run,
+                        stage: &stage,
+                        revision: &revision,
+                    },
+                    note.trim(),
+                    terminal,
+                )
+            })
+        }
+        ReviewCommand::AuthorizeReviewChange { run, stage, change } => {
+            let terminal = approval::configured_terminal(space)?;
+            with_run(space, &run, |path, lock, state| {
+                let mut plan = Plan::load(path)?;
+                state.verify_archives(path, false)?;
+                if let Some(terminal) = terminal {
+                    let pending = policy::changes(state, &plan)?
+                        .into_iter()
+                        .find(|pending| {
+                            pending.stage == stage && pending.token.as_deref() == Some(&change)
+                        })
+                        .context("review policy change no longer matches; run status")?;
+                    let contract = format!("stages/{stage}/stage.md");
+                    terminal.subject(
+                        &run,
+                        &change,
+                        [(stage.as_str(), std::slice::from_ref(&contract))],
+                    );
+                    eprintln!("Previous decision: {}", pending.previous);
+                    eprintln!(
+                        "Proposed decision: {}",
+                        pending.proposed.unwrap_or("Remove this review requirement")
+                    );
+                    terminal.confirm("change")?;
+                    plan = Plan::load(path)?;
+                }
+                policy::authorize(state, &plan, &stage, &change)?;
+                lock.save(state)?;
+                println!(
+                    "Recorded the review policy change for {stage}. Use {} status {run}.",
+                    invocation(&space.root)
+                );
+                Ok(())
+            })
+        }
+        ReviewCommand::BatchReview { run } => with_run(space, &run, |_, lock, state| {
             if !state.batch_review {
                 state.batch_review = true;
                 lock.save(state)?;
@@ -706,87 +942,68 @@ fn dispatch(command: Command) -> Result<()> {
             );
             Ok(())
         }),
-        Command::ApproveBatch {
+        ReviewCommand::ApproveBatch {
             run,
             revision,
             task,
-        } => with_review_target(&space, &run, task, |target, path, lock, state| {
-            let run = target.run;
-            ensure!(state.batch_review, "batch review is disabled for {run}");
-            let plan = Plan::load(path)?;
-            let view = refresh(path, lock, &plan, state)?;
-            if state.last_batch.as_deref() == Some(revision.as_str()) {
-                println!("Batch {revision} is already approved.");
-                return Ok(());
-            }
-            let (token, pending) = review::pending_batch(&view, state)?;
-            ensure!(
-                token == revision,
-                "review batch changed. Use anydock review {}.",
-                target.selector()
-            );
-            for (stage, archive) in &pending {
-                state
-                    .stages
-                    .get_mut(stage)
-                    .context("missing stage")?
-                    .approvals
-                    .insert(archive.clone());
-            }
-            state.last_batch = Some(token);
-            lock.save(state)?;
-            println!("Approved {} exact revisions for {run}.", pending.len());
-            Ok(())
-        }),
-        Command::Review {
+        } => {
+            let terminal = approval::configured_terminal(space)?;
+            with_review_target(space, &run, task, |target, path, lock, state| {
+                approve_batch(path, lock, state, target, &revision, terminal)
+            })
+        }
+        ReviewCommand::Review {
             run,
             since,
             retained,
             task,
-        } => with_review_target(&space, &run, task, |target, path, lock, state| {
-            let run = target.run;
-            let since = if retained {
-                Some(
-                    state
-                        .update
-                        .as_ref()
-                        .and_then(|update| update.presentation.as_ref())
-                        .context("this run has no retained review comparison")?
-                        .token
-                        .clone(),
-                )
-            } else {
-                since
-            };
-            ensure!(
-                since.is_none() || state.batch_review,
-                "--since requires batch review"
-            );
-            let plan = Plan::load(path)?;
-            let view = refresh(path, lock, &plan, state)?;
-            if state.batch_review && view.stages.iter().any(|item| item.phase == Phase::Review) {
-                review::batch(&space, path, lock, state, target, &view, since.as_deref())
-            } else if let Some(item) = view.front().filter(|item| item.phase == Phase::Review) {
-                review::gate(&space, path, state, target, item, true, None)
-            } else {
-                println!("No active review in {run}.");
-                print_status(run, &view, state, false);
-                Ok(())
-            }
-        }),
-        Command::SaveWorkflow { run, name } => workflow::save(&space, &run, &name),
-        Command::AdoptReference { run, path: name } => with_run(&space, &run, |path, _, state| {
-            let plan = Plan::load(path)?;
-            policy::require_current(state, &plan)?;
-            state.verify_archives(path, false)?;
-            let workflow = state
-                .workflow
-                .as_deref()
-                .context("this run has no saved workflow")?;
-            workflow::adopt_reference(&space, path, &plan, workflow, &name)?;
-            println!("Pinned {name}. Use anydock status {run} to see affected stages.");
-            Ok(())
-        }),
+            interactive,
+        } => {
+            let terminal = interactive.then(approval::Terminal::require).transpose()?;
+            with_review_target(space, &run, task, |target, path, lock, state| {
+                let run = target.run;
+                let since = if retained {
+                    Some(
+                        state
+                            .update
+                            .as_ref()
+                            .and_then(|update| update.presentation.as_ref())
+                            .context("this run has no retained review comparison")?
+                            .token
+                            .clone(),
+                    )
+                } else {
+                    since
+                };
+                ensure!(
+                    since.is_none() || state.batch_review,
+                    "--since requires batch review"
+                );
+                let plan = Plan::load(path)?;
+                let view = refresh(path, lock, &plan, state)?;
+                if state.batch_review && view.stages.iter().any(|item| item.phase == Phase::Review)
+                {
+                    review::batch(space, path, lock, state, target, &view, since.as_deref())?;
+                    if let Some(terminal) = terminal {
+                        interactive_review(path, lock, state, target, &view, terminal)?;
+                    }
+                    Ok(())
+                } else if let Some(item) = view.front().filter(|item| item.phase == Phase::Review) {
+                    review::gate(space, path, state, target, item, true, None)?;
+                    if let Some(next) = view.first_gated_by(item.stage, false) {
+                        println!("Gates: {next}");
+                    }
+                    if let Some(terminal) = terminal {
+                        interactive_review(path, lock, state, target, &view, terminal)?;
+                    }
+                    Ok(())
+                } else {
+                    println!("No active review in {run}.");
+                    print_status(path, run, &view, state);
+                    Ok(())
+                }
+            })
+        }
     }
 }
 
@@ -878,13 +1095,22 @@ fn check(space: &Workspace) -> Result<()> {
     Ok(())
 }
 
-fn start(space: &Workspace, id: &str, saved: Option<&str>) -> Result<()> {
+fn start(space: &Workspace, id: &str, saved: Option<&str>, adopt: bool) -> Result<()> {
     let run = space.run(id)?;
+    let command = invocation(&space.root);
     read_brief(&run)?;
-    ensure!(
-        !file(&run, PROGRESS)?.try_exists()?,
-        "run {id} uses agent-only progress"
-    );
+    let has_progress = file(&run, PROGRESS)?.try_exists()?;
+    if adopt {
+        ensure!(has_progress, "run {id} has no agent-only progress to adopt");
+    } else if has_progress {
+        ensure!(
+            LockedRun::inspect(&run)?.is_some(),
+            "run {id} uses agent-only progress. Use {command} adopt {id} when managed execution is authorized"
+        );
+    }
+    if adopt {
+        Plan::load(&run)?;
+    }
     let lock = LockedRun::acquire(&run, true)?.context("failed to initialize run lock")?;
     if let Some(existing) = lock.read()? {
         ensure!(
@@ -894,7 +1120,7 @@ fn start(space: &Workspace, id: &str, saved: Option<&str>) -> Result<()> {
         Plan::load(&run)?;
         existing.verify_archives(&run, false)?;
         lock.ensure_registered_marker()?;
-        println!("Run {id} is already registered. Use anydock status {id}.");
+        println!("Run {id} is already registered. Use {command} status {id}.");
         return Ok(());
     }
     if let Some(name) = saved {
@@ -905,7 +1131,14 @@ fn start(space: &Workspace, id: &str, saved: Option<&str>) -> Result<()> {
     policy::capture(&mut state, &plan);
     lock.save(&state)?;
     lock.ensure_registered_marker()?;
-    println!("Registered run {id}. Use anydock status {id} or anydock next {id}.");
+    if adopt {
+        println!(
+            "Registered {id}. Its progress and outputs are intact. Managed stages require their own completion and approval."
+        );
+    } else {
+        println!("Registered run {id}.");
+    }
+    println!("Use {command} status {id} or {command} next {id}.");
     Ok(())
 }
 
@@ -979,9 +1212,9 @@ fn status(space: &Workspace, id: &str, inspect: bool, diff: bool) -> Result<()> 
         if let Some(mut state) = LockedRun::inspect(&path)? {
             let plan = Plan::load(&path)?;
             state.verify_archives(&path, false)?;
-            if !print_policy(id, &state, &plan, true)? {
+            if !print_policy(&path, id, &state, &plan)? {
                 let view = evaluate(&path, &plan, &mut state, false)?;
-                print_status(id, &view, &state, true);
+                print_status(&path, id, &view, &state);
                 if diff
                     && let Some(item) = view.action(state.batch_review)
                     && item.phase == Phase::Review
@@ -1003,9 +1236,9 @@ fn status(space: &Workspace, id: &str, inspect: bool, diff: bool) -> Result<()> 
             lock.save(&state)?;
         }
         lock.ensure_registered_marker()?;
-        if !print_policy(id, &state, &plan, false)? {
+        if !print_policy(&path, id, &state, &plan)? {
             let view = refresh(&path, &lock, &plan, &mut state)?;
-            print_status(id, &view, &state, false);
+            print_status(&path, id, &view, &state);
         }
         return Ok(());
     }
@@ -1021,9 +1254,10 @@ fn status(space: &Workspace, id: &str, inspect: bool, diff: bool) -> Result<()> 
     Ok(())
 }
 
-fn print_policy(run: &str, state: &State, plan: &Plan, inspect: bool) -> Result<bool> {
+fn print_policy(path: &Path, run: &str, state: &State, plan: &Plan) -> Result<bool> {
     let changes = policy::changes(state, plan)?;
     if !changes.is_empty() {
+        let command = run_invocation(path);
         println!("Run {run} | blocked by changes to its review policy");
         for change in &changes {
             println!(
@@ -1034,9 +1268,9 @@ fn print_policy(run: &str, state: &State, plan: &Plan, inspect: bool) -> Result<
                 "  Proposed decision: {}",
                 change.proposed.unwrap_or("Remove this review requirement")
             );
-            if !inspect && let Some(token) = &change.token {
+            if let Some(token) = &change.token {
                 println!(
-                    "  If the human authorizes the policy change: anydock authorize-review-change {run} {} --change {token}",
+                    "  If the human authorizes the policy change: {command} authorize-review-change {run} {} --change {token}",
                     change.stage
                 );
             }
@@ -1048,7 +1282,8 @@ fn print_policy(run: &str, state: &State, plan: &Plan, inspect: bool) -> Result<
     Ok(!changes.is_empty())
 }
 
-fn print_status(run: &str, view: &View<'_>, state: &State, inspect: bool) {
+fn print_status(path: &Path, run: &str, view: &View<'_>, state: &State) {
+    let command = run_invocation(path);
     println!("Run {run} | brief: runs/{run}/brief.md");
     if let Some(update) = &state.update {
         println!("Updated from: runs/{}", update.from);
@@ -1064,7 +1299,7 @@ fn print_status(run: &str, view: &View<'_>, state: &State, inspect: bool) {
         && view.stages.iter().any(|item| item.phase == Phase::Review)
     {
         println!(
-            "To compare with the retained presentation: anydock review {run} --since {}",
+            "To compare with the retained presentation: {command} review {run} --since {}",
             presentation.token
         );
     }
@@ -1085,7 +1320,7 @@ fn print_status(run: &str, view: &View<'_>, state: &State, inspect: bool) {
             && let Some(reused) = update.reused.get(&item.stage.id)
             && item.revision.as_deref() == Some(&reused.revision)
         {
-            println!("  Reused from runs/{} | {}", update.from, reused.from);
+            println!("  Reused from runs/{}", update.from);
         }
         for reason in &item.reasons {
             println!("  {reason}");
@@ -1115,9 +1350,10 @@ fn print_status(run: &str, view: &View<'_>, state: &State, inspect: bool) {
                 println!("  Decision: {decision}");
             }
             if let Some(revision) = &item.revision {
-                println!("  Archive ID: {revision}");
-                println!("  Compare: anydock diff {run} {}", item.stage.id);
-                if !inspect && let Some(token) = state.review_token(&item.stage.id, revision) {
+                println!("  Compare: {command} diff {run} {}", item.stage.id);
+                if !state.batch_review
+                    && let Some(token) = state.review_token(&item.stage.id, revision)
+                {
                     println!("  Revision: {token}");
                 }
             }
@@ -1125,6 +1361,11 @@ fn print_status(run: &str, view: &View<'_>, state: &State, inspect: bool) {
                 println!("  Gates: {next}");
             }
         }
+    }
+    if state.batch_review
+        && let Ok((token, _)) = review::pending_batch(view, state)
+    {
+        println!("Batch revision: {token}");
     }
     for prior in state.stages.keys() {
         if !view.stages.iter().any(|item| &item.stage.id == prior) {
@@ -1140,25 +1381,25 @@ fn print_status(run: &str, view: &View<'_>, state: &State, inspect: bool) {
                 item.stage.contract_path(),
                 item.attempt.unwrap_or_default()
             ),
-            Phase::Review if state.batch_review => println!("Next: anydock review {run}"),
+            Phase::Review if state.batch_review => println!("Next: {command} review {run}"),
             Phase::Review => {
                 let token = item
                     .revision
                     .as_deref()
                     .and_then(|id| state.review_token(&item.stage.id, id));
-                match token.filter(|_| !inspect) {
+                match token {
                     Some(token) => println!(
-                        "Next: human review. If approved, record: anydock approve {run} {} --revision {token}",
+                        "Next: human review. If approved, record: {command} approve {run} {} --revision {token}",
                         item.stage.id
                     ),
                     None => println!(
-                        "Next: use anydock status {run} to reconcile and present the current review."
+                        "Next: use {command} review {run} to record and present the current revision."
                     ),
                 }
             }
-            Phase::Ready => println!("Next: anydock next {run}"),
+            Phase::Ready => println!("Next: {command} next {run}"),
             Phase::Stale if item.basis.is_some() => {
-                println!("Next: inspect the changes, then anydock next {run} --retry")
+                println!("Next: inspect the changes, then {command} next {run} --retry")
             }
             _ => println!(
                 "Next: resolve the listed files or decisions blocking {}.",
@@ -1203,7 +1444,7 @@ fn complete(
     }) {
         println!("Attempt {attempt} was already recorded.");
         if !quiet {
-            print_status(run, &view, state, false);
+            print_status(path, run, &view, state);
         }
         return Ok(());
     }
@@ -1229,6 +1470,7 @@ fn complete(
         .get_mut(stage)
         .context("missing active stage")?;
     entry.record(revision)?;
+    entry.mark_finalized(item.stage.fields.review.is_none());
     entry.attempt = None;
     entry.last_completed_attempt = Some(attempt);
     lock.save(state)?;
@@ -1236,19 +1478,30 @@ fn complete(
         println!("Completed {stage} at attempt {attempt}.");
     } else {
         let view = refresh(path, lock, &plan, state)?;
-        print_status(run, &view, state, false);
+        print_status(path, run, &view, state);
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct StageDecision<'a> {
+    run: &'a str,
+    stage: &'a str,
+    revision: &'a str,
 }
 
 fn approve(
     path: &Path,
     lock: &LockedRun,
     state: &mut State,
-    run: &str,
-    stage: &str,
-    revision: &str,
+    decision: StageDecision<'_>,
+    terminal: Option<approval::Terminal>,
 ) -> Result<()> {
+    let StageDecision {
+        run,
+        stage,
+        revision,
+    } = decision;
     let plan = Plan::load(path)?;
     let view = refresh(path, lock, &plan, state)?;
     let item = find_stage(&view, stage)?;
@@ -1256,9 +1509,12 @@ fn approve(
         .revision
         .as_deref()
         .context("stage has no recorded revision; use status")?;
+    let current = state
+        .review_token(stage, archive_id)
+        .context("missing review identity")?;
     ensure!(
-        state.review_token(stage, archive_id).as_deref() == Some(revision),
-        "revision changed for {stage}; use status to review the current files"
+        review::matches_token(revision, &current, review::stage_tokens(state, stage)),
+        "revision changed or is ambiguous for {stage}; use review to see the current files"
     );
     if item.phase == Phase::Done
         && state
@@ -1278,11 +1534,237 @@ fn approve(
             item.phase.label()
         );
     }
+    if let Some(terminal) = terminal {
+        terminal.subject(
+            run,
+            &current,
+            [(stage, item.stage.fields.outputs.as_slice())],
+        );
+        terminal.confirm("approve")?;
+        return approve(
+            path,
+            lock,
+            state,
+            StageDecision {
+                revision: &current,
+                ..decision
+            },
+            None,
+        );
+    }
     let entry = state.stages.get_mut(stage).context("missing stage")?;
     entry.approvals.insert(archive_id.into());
+    entry.mark_finalized(true);
     lock.save(state)?;
-    println!("Approved revision {revision} for {stage}.");
+    println!("Approved revision {current} for {stage}.");
     let view = refresh(path, lock, &plan, state)?;
-    print_status(run, &view, state, false);
+    print_status(path, run, &view, state);
     Ok(())
+}
+
+fn reject(
+    path: &Path,
+    lock: &LockedRun,
+    state: &mut State,
+    decision: StageDecision<'_>,
+    note: &str,
+    terminal: Option<approval::Terminal>,
+) -> Result<()> {
+    let StageDecision {
+        run,
+        stage,
+        revision: supplied,
+    } = decision;
+    ensure!(
+        review::valid_note(note),
+        "provide one line of feedback, up to 1024 UTF-8 bytes"
+    );
+    let plan = Plan::load(path)?;
+    let view = refresh(path, lock, &plan, state)?;
+    let item = find_stage(&view, stage)?;
+    let entry = state
+        .stages
+        .get(stage)
+        .context("stage has no recorded review")?;
+    let archive = entry
+        .head
+        .as_deref()
+        .context("stage has no recorded review")?;
+    let token = state
+        .review_token(stage, archive)
+        .context("missing review identity")?;
+    ensure!(
+        review::matches_token(supplied, &token, review::stage_tokens(state, stage)),
+        "revision changed or is ambiguous for {stage}; use review to see the current files"
+    );
+    if let Some(previous) = entry.rejections.get(archive) {
+        ensure!(
+            previous == note,
+            "changes were already requested for this revision with a different note"
+        );
+        println!("Changes are already requested for {stage}.");
+        return Ok(());
+    }
+    ensure!(
+        item.phase == Phase::Review && item.revision.as_deref() == Some(archive),
+        "{stage} is not waiting for this review"
+    );
+    if !state.batch_review {
+        require_action(&view, stage, false)?;
+    }
+    if let Some(terminal) = terminal {
+        terminal.subject(run, &token, [(stage, item.stage.fields.outputs.as_slice())]);
+        terminal.confirm("reject")?;
+        return reject(
+            path,
+            lock,
+            state,
+            StageDecision {
+                revision: &token,
+                ..decision
+            },
+            note,
+            None,
+        );
+    }
+    let archive = archive.to_owned();
+    state.record_rejection(stage, archive, note)?;
+    lock.save(state)?;
+    println!("Changes requested for {stage}. Its draft and revision are preserved.");
+    println!(
+        "When rework is authorized, run {} next {run}.",
+        run_invocation(path)
+    );
+    Ok(())
+}
+
+fn approve_batch(
+    path: &Path,
+    lock: &LockedRun,
+    state: &mut State,
+    target: review::Target<'_>,
+    revision: &str,
+    terminal: Option<approval::Terminal>,
+) -> Result<()> {
+    let run = target.run;
+    ensure!(state.batch_review, "batch review is disabled for {run}");
+    let plan = Plan::load(path)?;
+    let view = refresh(path, lock, &plan, state)?;
+    if let Some(last) = &state.last_batch
+        && review::matches_token(revision, last, review::batch_tokens(state))
+    {
+        println!("Batch {revision} is already approved.");
+        return Ok(());
+    }
+    let (token, pending) = review::pending_batch(&view, state)?;
+    ensure!(
+        review::matches_token(revision, &token, review::batch_tokens(state)),
+        "review batch changed. Use {} review {}.",
+        run_invocation(path),
+        target.selector()
+    );
+    if let Some(terminal) = terminal {
+        terminal.subject(
+            run,
+            &token,
+            view.stages
+                .iter()
+                .filter(|item| item.phase == Phase::Review)
+                .map(|item| (item.stage.id.as_str(), item.stage.fields.outputs.as_slice())),
+        );
+        terminal.confirm("approve")?;
+        return approve_batch(path, lock, state, target, &token, None);
+    }
+    for (stage, archive) in &pending {
+        let entry = state.stages.get_mut(stage).context("missing stage")?;
+        entry.approvals.insert(archive.clone());
+        entry.mark_finalized(true);
+    }
+    state.last_batch = Some(token);
+    lock.save(state)?;
+    println!("Approved {} exact revisions for {run}.", pending.len());
+    Ok(())
+}
+
+fn interactive_review(
+    path: &Path,
+    lock: &LockedRun,
+    state: &mut State,
+    target: review::Target<'_>,
+    view: &View<'_>,
+    terminal: approval::Terminal,
+) -> Result<()> {
+    let stages: Vec<_> = if state.batch_review {
+        view.stages
+            .iter()
+            .filter(|item| item.phase == Phase::Review)
+            .collect()
+    } else {
+        view.front().into_iter().collect()
+    };
+    let revision = |item: &StageView<'_>| {
+        item.revision
+            .as_deref()
+            .and_then(|archive| state.review_token(&item.stage.id, archive))
+            .context("review revision is unavailable")
+    };
+    let first = stages.first().context("no pending reviews")?;
+    let token = if state.batch_review {
+        review::pending_batch(view, state)?.0
+    } else {
+        revision(first)?
+    };
+    terminal.subject(
+        target.run,
+        &token,
+        stages
+            .iter()
+            .map(|item| (item.stage.id.as_str(), item.stage.fields.outputs.as_slice())),
+    );
+    match terminal.choose()? {
+        approval::Choice::Skip => {
+            println!("Review skipped. No decision recorded.");
+            Ok(())
+        }
+        approval::Choice::Approve if state.batch_review => {
+            approve_batch(path, lock, state, target, &token, None)
+        }
+        approval::Choice::Approve => approve(
+            path,
+            lock,
+            state,
+            StageDecision {
+                run: target.run,
+                stage: &first.stage.id,
+                revision: &token,
+            },
+            None,
+        ),
+        approval::Choice::Reject => {
+            let selected = if stages.len() == 1 {
+                first
+            } else {
+                let stage =
+                    terminal.read("Which pending stage needs changes? Enter the stage ID.")?;
+                stages
+                    .iter()
+                    .find(|item| item.stage.id == stage)
+                    .context("that stage is not pending review")?
+            };
+            let selected_token = revision(selected)?;
+            let note = terminal.read("What should change? Enter one line of feedback.")?;
+            reject(
+                path,
+                lock,
+                state,
+                StageDecision {
+                    run: target.run,
+                    stage: &selected.stage.id,
+                    revision: &selected_token,
+                },
+                &note,
+                None,
+            )
+        }
+    }
 }

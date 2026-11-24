@@ -1,5 +1,5 @@
 use crate::{
-    storage::{Hashes, LockedRun, State, copy_exact, hash, live_hash, sync_dir},
+    storage::{Hashes, LockedRun, State, copy_exact, hash, live_hash, lock_file, sync_dir},
     workspace::{BRIEF, Plan, Workspace, directory, file, names, slug},
 };
 use anyhow::{Context, Result, ensure};
@@ -90,7 +90,7 @@ pub fn unpack(space: &Workspace, bundle: &str, run: &str) -> Result<()> {
     let destination = space.run(run)?;
     let scratch = scratch(space)?;
     // Serialize identity checks and installation across simultaneous imports.
-    let _lock = LockedRun::acquire(&scratch, true)?.context("lock bundle imports")?;
+    let _lock = lock_file(&file(&scratch, "bundle-import.lock")?, "bundle imports")?;
     ensure!(!destination.try_exists()?, "run {run} already exists");
     for existing in names(&space.root, "runs")? {
         if let Some(state) = LockedRun::inspect(&space.run(&existing)?)? {
@@ -106,7 +106,10 @@ pub fn unpack(space: &Workspace, bundle: &str, run: &str) -> Result<()> {
     verify(staged.path(), &manifest)?;
     fs::create_dir_all(destination.parent().context("missing runs collection")?)?;
     publish(staged.path(), &destination)?;
-    println!("Installed bundle {bundle} as {run}. Run anydock handoff {run}.");
+    println!(
+        "Installed bundle {bundle} as {run}. Run {} handoff {run}.",
+        crate::workspace::invocation(&space.root)
+    );
     Ok(())
 }
 
@@ -123,9 +126,12 @@ fn bundle_path(space: &Workspace, name: &str) -> Result<PathBuf> {
 
 fn live_files(run: &Path, plan: &Plan, state: &State) -> Result<Hashes> {
     let mut files = Hashes::from([(BRIEF.into(), hash(&plan.brief))]);
+    if let Some(digest) = live_hash(run, "notes.md")? {
+        files.insert("notes.md".into(), digest);
+    }
     let mut names = BTreeSet::new();
     for stage in &plan.stages {
-        files.insert(stage.contract_path(), hash(&stage.contract));
+        files.extend(stage.definition_hashes());
         names.extend(stage.fields.inputs.iter());
         names.extend(stage.fields.outputs.iter());
         names.extend(

@@ -138,7 +138,14 @@ pub fn evaluate<'a>(
     let mut available: BTreeMap<&str, Available> = BTreeMap::new();
     let brief_hash = hash(&plan.brief);
     for stage in &plan.stages {
-        let (basis, missing) = capture_basis(run, stage, plan, &brief_hash, &available)?;
+        let (basis, missing) = capture_basis(
+            run,
+            stage,
+            plan,
+            &brief_hash,
+            &available,
+            state.input_format(stage),
+        )?;
         let mut item = StageView {
             stage,
             phase: Phase::Ready,
@@ -160,7 +167,10 @@ pub fn evaluate<'a>(
             } else if let Some((id, revision)) = entry.current() {
                 item.revision = Some(id.to_owned());
                 item.phase = Phase::Stale;
-                if compare(&mut item, &revision.basis) {
+                let current = compare(&mut item, &revision.basis);
+                if current && entry.rejections.contains_key(id) {
+                    item.phase = Phase::Ready;
+                } else if current {
                     let (outputs, missing) = read_outputs(run, stage)?;
                     item.reasons.extend(missing);
                     if item.reasons.is_empty() {
@@ -180,7 +190,7 @@ pub fn evaluate<'a>(
                                     edited.iter().map(|name| format!("output edited: {name}")),
                                 );
                                 item.reasons.push(
-                                    "live edit is unrecorded; use status to reconcile".into(),
+                                    "live edit is unrecorded; use review to present it or status --reconcile to record it".into(),
                                 );
                                 item.revision = None;
                                 if stage.fields.review.is_some() {
@@ -206,6 +216,7 @@ pub fn evaluate<'a>(
                                 checks: item.checks.clone(),
                             })?;
                             item.revision = Some(id);
+                            entry.mark_finalized(stage.fields.review.is_none());
                             view.changed = true;
                         }
                         let (_, current) = entry.current().context("missing current revision")?;
@@ -227,6 +238,9 @@ pub fn evaluate<'a>(
                         };
                     }
                 }
+            }
+            if let Some(note) = entry.head.as_ref().and_then(|id| entry.rejections.get(id)) {
+                item.reasons.push(format!("Changes requested: {note}"));
             }
         }
         if item.phase == Phase::Ready && item.basis.is_none() {
@@ -259,6 +273,7 @@ fn capture_basis(
     plan: &Plan,
     brief_hash: &str,
     available: &BTreeMap<&str, Available>,
+    input_format: input_scope::Format,
 ) -> Result<(Option<Basis>, Vec<String>)> {
     let mut basis = Basis::from([
         (
@@ -293,7 +308,7 @@ fn capture_basis(
             expected_hash = upstream.outputs.get(name);
         }
         let actual = if let Some(pointers) = stage.fields.input_fields.get(name) {
-            match input_scope::read(run, name, pointers) {
+            match input_scope::read(run, name, pointers, input_format) {
                 Ok(bytes) => bytes.map(|bytes| hash(&bytes)),
                 Err(err) => {
                     missing.push(format!("input blocked: {err:#}"));
@@ -361,7 +376,14 @@ pub fn reuse_unchanged(
             stage.id == entry.stage.id,
             "update stages changed while copying"
         );
-        let (basis, mut reasons) = capture_basis(run, stage, plan, &brief_hash, &available)?;
+        let (basis, mut reasons) = capture_basis(
+            run,
+            stage,
+            plan,
+            &brief_hash,
+            &available,
+            state.input_format(stage),
+        )?;
         let mut result = Available {
             phase: Phase::Blocked,
             revision: None,
@@ -394,6 +416,7 @@ pub fn reuse_unchanged(
                         if old.approvals.contains(old_id) {
                             destination.approvals.insert(revision.clone());
                         }
+                        destination.finalized_at = old.finalized_at;
                         update.reused.insert(
                             stage.id.clone(),
                             ReusedRevision {
@@ -453,7 +476,7 @@ fn reuse_revision(
 pub fn begin(state: &mut State, item: &StageView<'_>, retry: bool) -> Result<u64> {
     match item.phase {
         Phase::Review => bail!(
-            "{} awaits human review; use status to see the current decision",
+            "{} awaits human review; use review to see the current decision",
             item.stage.id
         ),
         Phase::Stale if item.basis.is_some() && !retry => {

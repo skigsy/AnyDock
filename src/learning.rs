@@ -1,27 +1,22 @@
 use crate::{
     engine::{self, Phase},
     policy, reference,
-    storage::{LockedRun, State, hash, verified_blob},
+    storage::{State, hash, lock_file, verified_blob},
     workflow,
-    workspace::{Plan, Workspace, load_stages},
+    workspace::{Plan, Workspace, directory, file, load_stages},
 };
 use anyhow::{Context, Result, ensure};
-use std::path::Path;
+use std::{fs, path::Path};
 
 pub struct Request<'a> {
     pub run: &'a str,
     pub stage: &'a str,
     pub workflow: &'a str,
-    pub rule: &'a str,
+    pub rule: Option<&'a str>,
     pub confirm: Option<&'a str>,
 }
 
 pub fn save(space: &Workspace, run: &Path, state: &mut State, request: Request<'_>) -> Result<()> {
-    let rule = request.rule.trim();
-    ensure!(
-        !rule.is_empty() && rule.len() <= 1024 && !rule.chars().any(char::is_control),
-        "provide one line of reusable guidance, up to 1024 UTF-8 bytes"
-    );
     let plan = Plan::load(run)?;
     state.verify_archives(run, false)?;
     policy::require_current(state, &plan)?;
@@ -37,19 +32,44 @@ pub fn save(space: &Workspace, run: &Path, state: &mut State, request: Request<'
     );
     let entry = &state.stages[request.stage];
     let (head, correction) = entry.current().context("missing source revision")?;
-    ensure!(
-        !correction.edited.is_empty(),
-        "this revision contains no recorded edit to carry forward"
-    );
     let order = entry.ordered_ids()?;
-    let before = order
-        .iter()
-        .rev()
-        .nth(1)
-        .context("missing prior revision")?;
-    for name in &correction.edited {
-        if let Some(digest) = entry.revisions[before].outputs.get(name) {
+    let (before, rule) = if let Some(rule) = request.rule {
+        ensure!(
+            !correction.edited.is_empty(),
+            "this revision contains no recorded edit to carry forward"
+        );
+        let before = order
+            .iter()
+            .rev()
+            .nth(1)
+            .context("missing prior revision")?;
+        (before, rule.trim())
+    } else {
+        order
+            .iter()
+            .rev()
+            .filter_map(|before| {
+                entry
+                    .rejections
+                    .get(before)
+                    .map(|note| (before, note.as_str()))
+            })
+            .next()
+            .context("this stage has no changes-requested note to carry forward")?
+    };
+    ensure!(
+        crate::review::valid_note(rule),
+        "provide one line of reusable guidance, up to 1024 UTF-8 bytes"
+    );
+    if request.rule.is_none() {
+        for digest in entry.revisions[before].outputs.values() {
             verified_blob(run, digest)?;
+        }
+    } else {
+        for name in &correction.edited {
+            if let Some(digest) = entry.revisions[before].outputs.get(name) {
+                verified_blob(run, digest)?;
+            }
         }
     }
 
@@ -58,7 +78,10 @@ pub fn save(space: &Workspace, run: &Path, state: &mut State, request: Request<'
     // Serialize confirmed writes, even when the source runs are different.
     let _lock = request
         .confirm
-        .map(|_| LockedRun::acquire(&workflow, true))
+        .map(|_| {
+            fs::create_dir_all(directory(&workflow, ".anydock")?)?;
+            lock_file(&file(&workflow, ".anydock/lock")?, "workflow guidance")
+        })
         .transpose()?;
     let definitions = load_stages(&workflow)?;
     let definition = definitions

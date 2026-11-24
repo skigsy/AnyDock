@@ -1,17 +1,23 @@
 use crate::{
     engine, policy,
-    storage::{State, copy_exact, live_hash, publish_run, sync_dir},
-    workspace::{Plan, Stage, Workspace, directory, file, segment, validate_ref},
+    storage::{State, copy_exact, fingerprint, live_hash, publish_run, sync_dir},
+    workspace::{Plan, Stage, Workspace, directory, file, input_component, segment, validate_ref},
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
-use std::{collections::BTreeSet, fs, io::Write, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 pub struct Request<'a> {
     pub run: &'a str,
     pub brief: &'a str,
     pub work: &'a str,
     pub input: &'a [String],
+    pub sources: &'a [PathBuf],
     pub output: &'a str,
     pub review: Option<&'a str>,
 }
@@ -42,6 +48,37 @@ pub fn create(space: &Workspace, request: Request<'_>) -> Result<()> {
         copy_exact(&file(&space.root, source)?, &file(staged, &dest)?, &digest)?;
         inputs.push(dest);
     }
+    for selected in request.sources {
+        let source = space.start.join(selected);
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("expected a UTF-8 source filename")?;
+        input_component(name)?;
+        let canonical = source
+            .parent()
+            .context("source has no parent folder")?
+            .canonicalize()?;
+        let path = file(&canonical, name)?;
+        ensure!(
+            path.is_file(),
+            "source file does not exist: {}",
+            selected.display()
+        );
+        let dest = format!("inputs/{name}");
+        ensure!(
+            !inputs
+                .iter()
+                .any(|other| other.to_lowercase() == dest.to_lowercase()),
+            "repeated destination {dest}"
+        );
+        copy_exact(
+            &path,
+            &file(staged, &dest)?,
+            &fingerprint(fs::File::open(&path)?)?,
+        )?;
+        inputs.push(dest);
+    }
     let output = format!("stages/01-work/outputs/{}", request.output);
     let fields = json!({"inputs": inputs, "outputs": [&output], "review": request.review});
     let tick = "\x60\x60\x60";
@@ -64,7 +101,7 @@ pub fn create(space: &Workspace, request: Request<'_>) -> Result<()> {
         println!("Read: runs/{}/{input}", request.run);
     }
     println!("Write: runs/{}/{output}", request.run);
-    print_completion(request.run, "01-work", attempt);
+    print_completion(space, request.run, "01-work", attempt);
     Ok(())
 }
 
@@ -133,8 +170,8 @@ pub fn repeat(
     let (stage, attempt) = begin_staged(staged, &plan, &mut state)?;
     publish_run(&temp, &target, id, &state)?;
     println!("Stage {} | attempt {attempt}", stage.id);
-    print_completion(id, &stage.id, attempt);
-    crate::stage_context::show(&target, id, &plan, stage)
+    print_completion(space, id, &stage.id, attempt);
+    crate::stage_context::show(&target, id, &plan, stage, state.input_format(stage))
 }
 
 pub fn begin_staged<'a>(run: &Path, plan: &'a Plan, state: &mut State) -> Result<(&'a Stage, u64)> {
@@ -149,6 +186,7 @@ pub fn begin_staged<'a>(run: &Path, plan: &'a Plan, state: &mut State) -> Result
     Ok((item.stage, attempt))
 }
 
-fn print_completion(id: &str, stage: &str, attempt: u64) {
-    println!("After verification: anydock complete {id} {stage} --attempt {attempt}");
+fn print_completion(space: &Workspace, id: &str, stage: &str, attempt: u64) {
+    let command = crate::workspace::invocation(&space.root);
+    println!("After verification: {command} complete {id} {stage} --attempt {attempt}");
 }

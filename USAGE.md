@@ -4,19 +4,27 @@
 
 ## Install in a new workspace
 
-Extract the current release into a new folder. Keep earlier workspaces and their executables together. To continue a prior job here, copy its editable inputs or handoffs into the new workspace and tell your agent what to do with them.
+Open the extracted `AnyDock-0.2.0/` folder for a blank workspace. To use an existing project, run the executable with `-C <project> init`. Initialization preserves the project's instructions and adapters. Ask your agent to read the AnyDock instructions from the extracted package when the project has its own instruction file.
+
+To use a newer binary with your existing workspace, run `anydock -C <workspace> upgrade --check`. A compatible workspace keeps its runs, workflow files, and approvals. For an earlier layout with a different `.version` marker, use `upgrade --check --from-marker <filename>` while the workspace is stopped. Use the same command without `--check` to publish the upgrade in place and preserve a verified sibling backup. Open that backup with the prior executable if you need to resume from the pre-upgrade state.
 
 ## Managed runs
 
 The source workspace works immediately through `AGENTS.md`. Its agent-only mode keeps a Markdown progress record. The Rust executable adds file validation, input version tracking, archived revisions, and enforced review gates for managed runs. The agent tells you which mode it is using.
 
-The Windows executable package includes `bin\anydock.exe`. For a source download, from this folder with Rust 1.89 or later and your platform's linker installed, run `cargo build --locked --release`. On Windows, the executable is `target\release\anydock.exe`. Elsewhere it is `target/release/anydock`. Run it from the workspace root, or put it on your PATH. `cargo run --locked -- <command>` also works from the root.
+The brief defines the task and authorization. Add free-form working notes in `runs/<run>/notes.md` to keep them available at handoff without changing the review basis. Declare any notes that a stage must consume under `inputs/` instead.
+
+The Windows executable package includes `bin\anydock.exe`. The Linux x64 and macOS ARM64 packages include `bin/anydock`. For a source download, from this folder with Rust 1.89 or later and your platform's linker installed, run `cargo build --locked --release`. On Windows, the executable is `target\release\anydock.exe`. Elsewhere it is `target/release/anydock`. Run it from the workspace root, or put it on your PATH. `cargo run --locked -- <command>` also works from the root.
 
 - `anydock check` validates the workspace and its definitions. A blank checkout passes.
-- `anydock status` lists local runs. Add the run name for its status and next action. Status records observed edits as new revisions. Use `status <run> --inspect` to inspect without changing files. Add `--diff` to preview an unrecorded edit awaiting review.
-- `anydock approve <run> <stage> --revision <id>` accepts the exact revision shown by status. After an edit, check status again and review the new revision.
+- `anydock status` lists local runs without writing state. Add a run name for its next action, and `--diff` to preview unrecorded edits. Use `review <run>` to record and present the current revision, or `status <run> --reconcile` to record edits explicitly.
+- `anydock init` makes an existing project folder ready for managed work. It preserves a project’s `AGENTS.md` and existing ignore rules. If a managed folder name collides, initialize in a dedicated folder. Commands discover the nearest workspace from child folders. Use `anydock -C <directory> status` to select a different workspace.
+- `anydock adopt <run>` registers an existing agent-only run when managed work is authorized. It keeps the brief, progress notes, stage contracts and output files. Existing files still need managed completion and any required review.
+- `anydock review <run>` shows the exact revision and a copyable approval command. `approve` accepts the full ID or the printed unique prefix. `reject <run> <stage> --revision <id> --note <text>` preserves the draft and opens rework. After the revised result is approved, `learn --from-rejection` can preview that feedback as reusable guidance.
+- Use `anydock review <run> --interactive` to preview and approve, reject, or skip in one terminal. A batch approval applies to every listed stage. A batch rejection asks which stage needs changes.
+- To require terminal confirmation for approvals, rejections, and review-policy changes, create `.anydock/approval.json` with `{"mode":"human-tty"}`. A direct approval shows the files, stage, and revision prefix before asking for `approve` or `y`. Terminal gating assumes ordinary access controls for the workspace and OS account.
 - `anydock diff <run> <stage>` compares recorded handoffs. `history` shows archive IDs, and `restore` writes a verified copy to `recovered/`.
-- `anydock --help` lists the commands Codex uses to run stages and save reusable definitions.
+- `anydock --help` lists the commands your agent uses to run stages and save reusable definitions.
 
 Inputs, handoffs, run records, saved workflows, and run bundles are ignored by Git.
 
@@ -35,16 +43,20 @@ Use `anydock define <name> --from inbox/<definition>.json` to create a saved wor
 
 Use `anydock review <run>` at the review gate. It shows the exact decision and revision and compares the new draft with the previous approved output when available. Inline changes show the removed value in `[- -]` and the replacement in `{+ +}`. Review the linked full file if the preview is incomplete.
 
+Review flags local Markdown links whose full bytes are outside the revision. To bind an appendix to the decision, declare it as an output or a whole-file input.
+
 For independent stages, `anydock batch-review <run>` groups their decisions into one review session. Execute one stage at a time with `next` and `complete`. Dependent stages wait for their required approvals. When ready, `review <run>` shows each pending file and one exact batch token. Use `approve-batch <run> --revision <token>` after explicitly approving the displayed group. The setting carries forward when you update the run.
 
 If the files for a recurring task already land in the same local folder, start it with
-`anydock begin <task> --definition inbox/<definition>.json --brief "<task>" --source "<folder>"`.
+`anydock begin <task> --workflow <saved-workflow> --brief "<task>" --source "<folder>"`.
 Then submit the latest packet with `anydock refresh <task> --submit`. AnyDock reads
 the exact filenames declared by the workflow, keeps a verified copy in each run,
 and leaves the original files in place. Use `anydock refresh <task>` to resume
 the current run. Its files remain usable if the source folder is offline. Run
 `anydock queue --sources` to see which tasks have new source files and which
 already have a pending decision. The scan does not submit or approve work.
+
+On the next submitted cycle, a saved workflow's approved guidance is copied into the affected stages. Its previous runs keep their pinned material and review records. A one-off JSON definition can still be used with `begin --definition`.
 
 ## Refresh a completed run
 
@@ -56,16 +68,20 @@ If a source changes during a batch review, use `update <previous-run> <new-run> 
 
 ## Continue in another harness
 
-Stop the outgoing agent before the incoming agent edits. For an active stage, record a short progress note with `anydock checkpoint <run> --attempt <id> --note <text>`. Choose how to open the receiving agent.
+Stop the outgoing agent before the incoming agent edits. Open the same folder and use `anydock handoff <run>` to read progress and the next action. For an active stage, record a short note with `checkpoint` before stopping. Use `takeover <run> --attempt <id>` when an authorized transfer should fence the previous attempt. The optional launch helpers below carry the same files and decision gates.
 
 - **Already have the receiving session open?** Open the same workspace and paste the message from `anydock offer <run> --attempt <id>`.
 - **Launching from a terminal?** Use `anydock switch <run> --attempt <id> -- <executable> <arguments> "{handoff}"`. Put the placeholder where the receiving CLI takes its prompt. On Windows use its executable or the runtime that loads its entry file. Your usual login and permission settings apply.
 
 Omit `--attempt` when no stage is active, including at human review. The receiving agent runs the printed `claim` command, which gives it the current handoff. An active attempt changes only when that claim commits. If the receiving process exits without claiming, the switch command reports it. The ticket is valid for 30 minutes or until the relevant state changes. For read-only inspection, use `anydock handoff <run>` or add `--json`.
 
-Codex and DeepSeek Harness profiles that load workspace instructions can read `AGENTS.md`. The bundled Gemini CLI setting uses that same file. For other agents, tell them to read `AGENTS.md` and run the handoff command.
+`AGENTS.md` holds the workspace rules. The shipped instruction adapters point to it. If your agent does not discover workspace instructions, ask it to read `AGENTS.md` and run the handoff command.
 
-For an authorized single-stage task, `anydock quick` can register and begin the run in one command using your brief, instructions, and selected inbox files. For an existing run, `next --context` returns the current attempt and a bounded preview of declared inputs and guidance.
+For an authorized single-stage task, `anydock run` can register and begin in one command. Use `--source <file>` to snapshot a selected document by its original name, or `--input` for files in the workspace inbox. For an existing run, `next --context` returns the current attempt and a bounded preview of the declared material.
+
+### Local MCP
+
+In an MCP client, configure a local stdio server with the absolute executable path and the argument array `["-C", "<workspace>", "mcp"]`. Use `status {}` to discover runs and `handoff` for a named run. Use `queue {"sources":true}` for recurring tasks and changed source files. Add `--allow-work` to the argument array to expose `next`, `complete`, `review`, and exact-source `refresh` for authorized work. The server uses local files and closes with the client. Human decisions remain on the terminal approval path.
 
 ## Start or refresh a recurring task
 
@@ -85,7 +101,7 @@ To correct a named task while it waits for review, add `--pending` to an `--inpu
 
 An external JSON input uses its whole file by default. A stage can instead declare `input_fields`, a map from a declared input path to the JSON pointers it needs. AnyDock keeps the full source and gives the stage the exact selected values. Use `anydock input <run> <stage> <path>` for the complete selection.
 
-An update can keep the stage approval when those values and the rest of its declared work are unchanged. A selected value keeps its original JSON representation, so a formatting edit within that value can require review. A missing field or invalid source blocks the stage.
+New runs canonicalize whitespace and object member order in selected values. Numeric literals stay exact. Use `"input_value_format": "exact"` when the selected value's original formatting matters. Archived runs and their updates retain the default recorded at registration. Older records without a default keep their exact hashing basis. A missing field, invalid source, or duplicate key in a selected object blocks the stage.
 
 ## Alternatives and delivery
 

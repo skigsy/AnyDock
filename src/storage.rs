@@ -43,9 +43,13 @@ pub struct Revision {
 pub struct Entry {
     pub attempt: Option<Attempt>,
     pub last_completed_attempt: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalized_at: Option<i64>,
     pub head: Option<String>,
     pub revisions: BTreeMap<String, Revision>,
     pub approvals: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rejections: BTreeMap<String, String>,
     #[serde(default)]
     pub order: Vec<String>,
 }
@@ -55,8 +59,31 @@ fn revision_id(parent: Option<&str>, revision: &Revision) -> Result<String> {
 }
 
 impl Entry {
+    pub fn mark_finalized(&mut self, finalized: bool) {
+        self.finalized_at = finalized.then(|| chrono::Utc::now().timestamp());
+    }
     pub fn current(&self) -> Option<(&str, &Revision)> {
         self.head.as_deref().map(|id| (id, &self.revisions[id]))
+    }
+
+    pub fn last_approved(&self) -> Option<&str> {
+        self.last_approved_in(&self.order)
+    }
+
+    pub fn approved_at_or_before(&self, revision: &str) -> Option<&str> {
+        if self.approvals.contains(revision) {
+            return self.approvals.get(revision).map(String::as_str);
+        }
+        let position = self.order.iter().position(|id| id == revision)?;
+        self.last_approved_in(&self.order[..position])
+    }
+
+    fn last_approved_in<'a>(&self, order: &'a [String]) -> Option<&'a str> {
+        order
+            .iter()
+            .rev()
+            .find(|id| self.approvals.contains(*id))
+            .map(String::as_str)
     }
 
     pub fn record(&mut self, revision: Revision) -> Result<String> {
@@ -280,6 +307,8 @@ pub struct State {
     pub sequence: u64,
     pub workflow: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped_input_default: Option<crate::input_scope::Format>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<RunUpdate>,
@@ -301,12 +330,30 @@ pub struct State {
 }
 
 impl State {
+    pub fn input_format(&self, stage: &crate::workspace::Stage) -> crate::input_scope::Format {
+        stage
+            .fields
+            .input_value_format
+            .or(self.scoped_input_default)
+            .unwrap_or(crate::input_scope::Format::Exact)
+    }
+
+    pub fn record_rejection(&mut self, stage: &str, revision: String, note: &str) -> Result<()> {
+        self.stages
+            .get_mut(stage)
+            .context("missing stage")?
+            .rejections
+            .insert(revision, note.into());
+        self.version = 7;
+        Ok(())
+    }
     pub fn new(workflow: Option<String>) -> Result<Self> {
         Ok(Self {
             version: 3,
             identity: Some(new_identity()?),
             sequence: 0,
             workflow,
+            scoped_input_default: Some(crate::input_scope::Format::default()),
             origin: None,
             update: None,
             recurring_start: None,
@@ -355,7 +402,7 @@ impl State {
 
     fn validate(&self) -> Result<()> {
         ensure!(
-            matches!(self.version, 1..=6),
+            matches!(self.version, 1..=7),
             "unsupported run state version"
         );
         if self.version >= 2 {
@@ -381,6 +428,15 @@ impl State {
             6
         } else {
             self.update.as_ref().map_or(3, RunUpdate::state_version)
+        };
+        let expected_version = if self
+            .stages
+            .values()
+            .any(|entry| !entry.rejections.is_empty())
+        {
+            7
+        } else {
+            expected_version
         };
         ensure!(
             self.version.max(3) == expected_version,
@@ -469,6 +525,17 @@ impl State {
                         .get(id)
                         .is_some_and(|revision| revision.decision.is_some()),
                     "{stage} has an approval without a matching review"
+                );
+            }
+            for (id, note) in &entry.rejections {
+                ensure!(
+                    entry
+                        .revisions
+                        .get(id)
+                        .is_some_and(|revision| revision.decision.is_some())
+                        && !entry.approvals.contains(id)
+                        && crate::review::valid_note(note),
+                    "{stage} has an invalid review rejection"
                 );
             }
             for id in entry
@@ -570,6 +637,25 @@ pub fn lock_file(path: &Path, subject: &str) -> Result<File> {
     Ok(lock)
 }
 
+pub fn persist_replace(mut temp: NamedTempFile, path: &Path) -> io::Result<()> {
+    // Windows scanners and editors can hold a replacement open briefly.
+    let mut delays = [20, 40, 80, 160].into_iter();
+    loop {
+        match temp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                let transient =
+                    cfg!(windows) && matches!(error.error.raw_os_error(), Some(5 | 32 | 33));
+                let Some(delay) = delays.next().filter(|_| transient) else {
+                    return Err(error.error);
+                };
+                temp = error.file;
+                std::thread::sleep(Duration::from_millis(delay));
+            }
+        }
+    }
+}
+
 pub struct LockedRun {
     state_path: PathBuf,
     run: PathBuf,
@@ -625,7 +711,7 @@ impl LockedRun {
         let mut temp = NamedTempFile::new_in(folder)?;
         write_state(temp.as_file_mut(), state)?;
         fault("before-state-replace");
-        temp.persist(&self.state_path)
+        persist_replace(temp, &self.state_path)
             .with_context(|| format!("replace {}", self.state_path.display()))?;
         sync_dir(folder)?;
         fault("after-state-replace");

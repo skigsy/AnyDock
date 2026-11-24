@@ -100,6 +100,118 @@ fn blank_is_valid_idle_and_git_free() {
 }
 
 #[test]
+fn init_discovers_an_existing_project_without_replacing_its_files() {
+    let space = Space(tempfile::tempdir().unwrap());
+    space.write("work/Q4 Report.md", "Unchanged report");
+    space.write("AGENTS.md", "Existing project instructions\n");
+    space.write("CLAUDE.md", "Existing project adapter\n");
+    space.write(".gitignore", "private.txt");
+    let root = space.0.path().to_str().unwrap();
+    assert!(space.ok(&["init"]).contains("workspace is idle"));
+    assert!(space.ok(&["init"]).contains("already initialized"));
+    assert!(
+        good(
+            space
+                .command(&["status"])
+                .current_dir(space.path("work"))
+                .output()
+                .unwrap()
+        )
+        .contains("idle")
+    );
+    assert!(
+        good(
+            space
+                .command(&["-C", root, "check"])
+                .current_dir(space.path("work"))
+                .output()
+                .unwrap()
+        )
+        .contains("0 runs, 0 workflows")
+    );
+    assert_eq!(
+        fs::read_to_string(space.path("AGENTS.md")).unwrap(),
+        "Existing project instructions\n"
+    );
+    assert_eq!(
+        fs::read_to_string(space.path("CLAUDE.md")).unwrap(),
+        "Existing project adapter\n"
+    );
+    assert_eq!(
+        fs::read_to_string(space.path("work/Q4 Report.md")).unwrap(),
+        "Unchanged report"
+    );
+    let ignored = fs::read_to_string(space.path(".gitignore")).unwrap();
+    assert!(ignored.starts_with("private.txt\n") && ignored.contains("/runs/\n"));
+    assert_eq!(ignored.matches("/runs/\n").count(), 1);
+
+    let other = Space(tempfile::tempdir().unwrap());
+    other.write("runs/data.txt", "Existing project data");
+    other.fails(&["init"], "runs/ is reserved");
+    assert!(!other.path(".anydock").exists());
+    assert!(!other.path("anydock.version").exists());
+    assert!(!other.path(".gitignore").exists());
+    assert!(!other.path("AGENTS.md").exists());
+    fs::rename(other.path("runs"), other.path("project-data")).unwrap();
+    other.write("workflows/data.txt", "Existing scripts");
+    other.fails(&["init"], "workflows/ is reserved");
+    assert!(!other.path(".anydock").exists());
+    fs::rename(other.path("workflows"), other.path("project-workflows")).unwrap();
+    assert!(other.ok(&["init"]).contains("idle"));
+    assert!(!other.path(".anydock").exists());
+    assert_eq!(
+        fs::read_to_string(other.path("project-data/data.txt")).unwrap(),
+        "Existing project data"
+    );
+}
+
+#[test]
+fn interrupted_init_can_retry_without_leaving_workspace_metadata() {
+    let space = Space(tempfile::tempdir().unwrap());
+    space.write(".gitignore", "my-private.txt\n");
+    let stopped = space
+        .command(&["init"])
+        .env("ANYDOCK_TEST_STOP", "before-init-marker")
+        .output()
+        .unwrap();
+    assert_eq!(stopped.status.code(), Some(71));
+    assert!(!space.path(".anydock").exists());
+    assert!(!space.path("anydock.version").exists());
+    assert!(space.ok(&["init"]).contains("idle"));
+    let ignored = fs::read_to_string(space.path(".gitignore")).unwrap();
+    assert!(ignored.starts_with("my-private.txt\n"));
+    assert_eq!(ignored.matches("/runs/\n").count(), 1);
+}
+
+#[test]
+fn adopt_keeps_agent_only_files_and_requires_fresh_managed_approval() {
+    let space = Space::new();
+    space.brief("report");
+    let output = space.stage("report", "01-draft", &[], Some("Accept the file?"));
+    space.write("runs/report/progress.md", "Previously reviewed in chat\n");
+    let output_path = format!("runs/report/{output}");
+    space.write(&output_path, "Existing work\n");
+    space.fails(&["start", "report"], "agent-only progress");
+    space.ok(&["adopt", "report"]);
+    space.ok(&["adopt", "report"]);
+    assert!(space.ok(&["status", "report"]).contains("01-draft | ready"));
+    assert_eq!(
+        fs::read_to_string(space.path("runs/report/progress.md")).unwrap(),
+        "Previously reviewed in chat\n"
+    );
+    assert_eq!(
+        fs::read_to_string(space.path(&output_path)).unwrap(),
+        "Existing work\n"
+    );
+    space.ok(&["next", "report"]);
+    assert!(
+        space
+            .ok(&["complete", "report", "01-draft", "--attempt", "1"])
+            .contains("awaiting review")
+    );
+}
+
+#[test]
 fn one_off_checks_files_and_waits_for_the_exact_review() {
     let space = Space::new();
     space.brief("work");
@@ -194,7 +306,7 @@ fn editing_a_reviewed_handoff_archives_and_invalidates_only_its_consumers() {
         .unwrap()
         .to_owned();
     space.write(&format!("runs/work/{upstream}"), "human revision");
-    let status = space.ok(&["status", "work"]);
+    let status = space.ok(&["status", "work", "--reconcile"]);
     let edited = revision(&status).to_owned();
     assert_ne!(original_token, edited);
     let edited_id = space.state("work")["stages"]["01-source"]["head"]
@@ -219,7 +331,7 @@ fn editing_a_reviewed_handoff_archives_and_invalidates_only_its_consumers() {
         "revision changed",
     );
     space.write(&format!("runs/work/{upstream}"), "01-source");
-    let reverted = space.ok(&["status", "work"]);
+    let reverted = space.ok(&["status", "work", "--reconcile"]);
     assert_ne!(revision(&reverted), original_token);
     assert_ne!(revision(&reverted), edited);
     space.ok(&[
@@ -411,7 +523,7 @@ fn check_rejects_bad_paths_and_bad_graphs() {
         "inputs/a\\b",
         "inputs/report.txt:stream",
         "inputs/con.txt",
-        "inputs/A.txt",
+        "inputs/COM¹.txt",
     ] {
         space.stage("work", "01-write", &[input], None);
         space.fails(&["check"], "invalid portable path");
@@ -426,6 +538,8 @@ fn check_rejects_bad_paths_and_bad_graphs() {
     space.fails(&["check"], "declared by an earlier stage");
     space.stage("work", "01-write", &["inputs/a", "inputs/a/b"], None);
     space.fails(&["check"], "conflicting file paths");
+    space.stage("work", "01-write", &["inputs/A.txt", "inputs/a.txt"], None);
+    space.fails(&["check"], "conflicting path spellings");
     space.write(
         contract_path,
         contract(&json!({ "inputs": [], "outputs": ["inputs/a"], "review": null })),
@@ -539,6 +653,7 @@ fn copied_runs_keep_their_approval_and_partial_copies_are_identified() {
     fs::rename(&alpha, space.path("runs/restored")).unwrap();
     fs::remove_file(space.path("runs/restored/.anydock/lock")).unwrap();
     assert_eq!(revision(&space.ok(&["status", "restored"])), tokens[0]);
+    assert!(!space.path("runs/restored/.anydock/lock").exists());
     space.ok(&["approve", "restored", "01-draft", "--revision", &tokens[0]]);
     fs::remove_file(space.path("runs/restored/.anydock/state.json")).unwrap();
     space.fails(&["start", "restored"], "missing .anydock/state.json");
@@ -597,11 +712,11 @@ fn inspection_preserves_files_and_corrupt_archives_block_advancement() {
     space.ok(&["complete", "work", "01-draft", "--attempt", "1"]);
     let before = space.state("work");
     space.write(&format!("runs/work/{out}"), "edited");
-    let report = space.ok(&["status", "work", "--inspect", "--diff"]);
+    let report = space.ok(&["status", "work", "--diff"]);
     assert!(report.contains("output edited") && !report.contains("Revision:"));
     assert!(report.contains("-first") && report.contains("+edited"));
     assert_eq!(space.state("work"), before);
-    let status = space.ok(&["status", "work"]);
+    let status = space.ok(&["status", "work", "--reconcile"]);
     let state = space.state("work");
     let entry = &state["stages"]["01-draft"];
     let id = entry["head"].as_str().unwrap();
@@ -630,7 +745,7 @@ fn legacy_approval_and_order_survive_migration() {
     space.write(&format!("runs/legacy/{out}"), "first");
     space.ok(&["complete", "legacy", "01-draft", "--attempt", "1"]);
     space.write(&format!("runs/legacy/{out}"), "updated");
-    let status = space.ok(&["status", "legacy"]);
+    let status = space.ok(&["status", "legacy", "--reconcile"]);
     space.ok(&[
         "approve",
         "legacy",
@@ -656,6 +771,8 @@ fn legacy_approval_and_order_survive_migration() {
             .ok(&["status", "legacy"])
             .contains("Run legacy is complete")
     );
+    assert_eq!(space.state("legacy"), state);
+    space.ok(&["status", "legacy", "--reconcile"]);
     let upgraded = space.state("legacy");
     assert_eq!(upgraded["version"], 3);
     assert_eq!(
@@ -794,7 +911,7 @@ fn diff_and_restore_use_verified_history_without_overwriting_live_work() {
         revision(&pending),
     ]);
     space.write(&live, "edited revision\n");
-    space.ok(&["status", "work"]);
+    space.ok(&["status", "work", "--reconcile"]);
     let difference = space.ok(&["diff", "work", "01-draft"]);
     assert!(difference.contains("-first revision") && difference.contains("+edited revision"));
     let args = [
@@ -1097,6 +1214,56 @@ fn quick_begins_reviewed_work_with_only_the_explicit_inbox_inputs() {
     );
 }
 
+#[test]
+fn quick_snapshots_a_selected_file_and_review_shows_a_copyable_short_revision() {
+    let space = Space::new();
+    let producer = tempfile::tempdir().unwrap();
+    let source = producer.path().join("Q4 Résumé (final).md");
+    fs::write(&source, "Approved source values\n").unwrap();
+    let begin = space.ok(&[
+        "quick",
+        "report",
+        "--brief",
+        "Prepare a report",
+        "--work",
+        "Use the selected file",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        "handoff.md",
+        "--review",
+        "Accept?",
+    ]);
+    assert!(begin.contains("inputs/Q4 Résumé (final).md"));
+    assert_eq!(
+        fs::read(space.path("runs/report/inputs/Q4 Résumé (final).md")).unwrap(),
+        fs::read(&source).unwrap()
+    );
+    space.write(
+        "runs/report/stages/01-work/outputs/handoff.md",
+        "Verified result\n",
+    );
+    space.ok(&["complete", "report", "01-work", "--attempt", "1"]);
+    let presented = space.ok(&["review", "report"]);
+    assert!(presented.contains("Verified result"));
+    let token = revision(&presented);
+    assert!(
+        presented
+            .lines()
+            .any(|line| line.ends_with(&format!("--revision {}", &token[..12])))
+    );
+    space.fails(
+        &["approve", "report", "01-work", "--revision", &token[..11]],
+        "revision changed",
+    );
+    space.ok(&["approve", "report", "01-work", "--revision", &token[..12]]);
+    assert!(space.ok(&["status", "report"]).contains("complete"));
+    assert_eq!(
+        fs::read_to_string(&source).unwrap(),
+        "Approved source values\n"
+    );
+}
+
 fn offered_ticket(bootstrap: &str) -> &str {
     bootstrap
         .split_once(" --ticket ")
@@ -1247,7 +1414,7 @@ fn verified_bundle_preserves_revisions_and_rejects_bad_content_and_duplicate_ide
         revision(&first),
     ]);
     from.write(&live, "edited revision");
-    let second = from.ok(&["status", "work"]);
+    let second = from.ok(&["status", "work", "--reconcile"]);
     assert_ne!(revision(&first), revision(&second));
     let offer = from.ok(&["offer", "work"]);
     from.ok(&["pack", "work", "travel"]);
@@ -1351,7 +1518,7 @@ fn approved_corrections_teach_only_future_runs_with_fresh_inputs() {
     space.fails(&args, "no recorded edit");
     space.write(&format!("runs/first/{output}"), "Edited client-ready draft");
     space.fails(&args, "must be approved");
-    let state = space.ok(&["status", "first"]);
+    let state = space.ok(&["status", "first", "--reconcile"]);
     space.ok(&[
         "approve",
         "first",
@@ -1457,7 +1624,7 @@ fn new_corrections_from_workflow_runs_keep_the_original_stage_scope() {
     space.write(&format!("runs/working/{output}"), "draft");
     space.ok(&["complete", "working", "01-write", "--attempt", "1"]);
     space.write(&format!("runs/working/{output}"), "edited");
-    let status = space.ok(&["status", "working"]);
+    let status = space.ok(&["status", "working", "--reconcile"]);
     space.ok(&[
         "approve",
         "working",
@@ -1544,7 +1711,7 @@ fn update_keeps_only_verified_current_branches_and_reopens_review() {
         }
         if stage == "02-side" {
             space.write(&path, "approved edit of side");
-            let edited = space.ok(&["status", "prior"]);
+            let edited = space.ok(&["status", "prior", "--reconcile"]);
             space.ok(&["approve", "prior", stage, "--revision", revision(&edited)]);
         }
     }
@@ -1739,6 +1906,95 @@ fn definition_publishes_existing_contracts_and_declared_references_only() {
 }
 
 #[test]
+fn rejection_preserves_the_draft_fences_approval_and_can_teach_after_rework() {
+    let space = Space::new();
+    space.brief("report");
+    let stage = "01-draft";
+    let output = space.stage("report", stage, &[], Some("Approve this draft?"));
+    space.ok(&["start", "report"]);
+    space.ok(&["save-workflow", "report", "weekly"]);
+    space.ok(&["next", "report"]);
+    let output_path = format!("runs/report/{output}");
+    space.write(&output_path, "First draft\n");
+    let first = space.ok(&["complete", "report", stage, "--attempt", "1"]);
+    let first_token = revision(&first);
+    let note = "Give the net figure before the breakdown.";
+    let request = [
+        "reject",
+        "report",
+        stage,
+        "--revision",
+        &first_token[..12],
+        "--note",
+        note,
+    ];
+    space.ok(&request);
+    let rejected = space.state("report");
+    assert_eq!(rejected["version"], 7);
+    assert_eq!(
+        fs::read_to_string(space.path(&output_path)).unwrap(),
+        "First draft\n"
+    );
+    assert!(space.ok(&request).contains("already requested"));
+    assert_eq!(space.state("report"), rejected);
+    space.fails(
+        &["approve", "report", stage, "--revision", first_token],
+        "ready",
+    );
+    let next = space.ok(&["next", "report", "--context"]);
+    assert!(next.contains(note) && next.contains("attempt 2"));
+    space.write(&output_path, "Net figure first\n");
+    let second = space.ok(&["complete", "report", stage, "--attempt", "2"]);
+    let learn = [
+        "learn",
+        "report",
+        stage,
+        "--workflow",
+        "weekly",
+        "--from-rejection",
+    ];
+    space.fails(&learn, "must be approved");
+    space.fails(&request, "revision changed");
+    space.ok(&["approve", "report", stage, "--revision", revision(&second)]);
+    let proposal = space.ok(&learn);
+    let confirmation = proposal
+        .lines()
+        .find_map(|line| line.strip_prefix("Confirmation: "))
+        .unwrap();
+    space.ok(&[learn.as_slice(), &["--confirm", confirmation]].concat());
+    assert!(
+        fs::read_to_string(space.path("workflows/weekly/guidance/01-draft/review.md"))
+            .unwrap()
+            .contains(note)
+    );
+    space.ok(&["check"]);
+}
+
+#[test]
+fn terminal_confirmation_rejects_a_noninteractive_approval() {
+    let space = Space::new();
+    space.brief("report");
+    let output = space.stage("report", "01-draft", &[], Some("Accept?"));
+    space.ok(&["start", "report"]);
+    space.ok(&["next", "report"]);
+    space.write(&format!("runs/report/{output}"), "Pending draft");
+    let completed = space.ok(&["complete", "report", "01-draft", "--attempt", "1"]);
+    let before = space.state("report");
+    space.write(".anydock/approval.json", r#"{"mode":"human-tty"}"#);
+    space.fails(
+        &[
+            "approve",
+            "report",
+            "01-draft",
+            "--revision",
+            revision(&completed),
+        ],
+        "requires a human terminal confirmation",
+    );
+    assert_eq!(space.state("report"), before);
+}
+
+#[test]
 fn review_shows_an_exact_delta_and_survives_a_missing_previous_run() {
     let space = Space::new();
     space.brief("first");
@@ -1848,6 +2104,108 @@ fn batch_review_binds_all_revisions_without_unlocking_dependencies_early() {
 }
 
 #[test]
+fn mcp_exposes_structured_resume_without_exposing_approval() {
+    let space = Space::new();
+    space.brief("work");
+    let output = space.stage("work", "01-draft", &[], Some("Accept the draft?"));
+    space.ok(&["start", "work"]);
+    space.write(&format!("runs/work/{output}"), "Eligible draft\n");
+    space.write("intake/data.txt", "Current values");
+    space.write("inbox/definition.json", json!({"stages":[{"id":"01-draft","work":"Review current values","inputs":["inputs/data.txt"],"outputs":[&output],"review":"Accept the intake?"}]}).to_string());
+    space.ok(&[
+        "begin",
+        "desk",
+        "--definition",
+        "inbox/definition.json",
+        "--brief",
+        "Work with the saved intake",
+        "--source",
+        space.path("intake").to_str().unwrap(),
+    ]);
+    space.write("intake/data.txt", "New values");
+    let requests = [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"next","arguments":{"run":"work"}}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"complete","arguments":{"run":"work","stage":"01-draft","attempt":1}}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"handoff","arguments":{"run":"work"}}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"approve","arguments":{"run":"work"}}}),
+        json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"status","arguments":{}}}),
+        json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"queue","arguments":{"sources":true}}}),
+        json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"reject","arguments":{}}}),
+        json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"authorize-review-change","arguments":{}}}),
+    ];
+    let run = |args: &[&str]| {
+        let mut child = space
+            .command(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        let mut input = child.stdin.take().unwrap();
+        for request in &requests {
+            writeln!(input, "{request}").unwrap();
+        }
+        drop(input);
+        good(child.wait_with_output().unwrap())
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let before = space.state("work");
+    let read_only = run(&["mcp"]);
+    assert_eq!(read_only[1]["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(read_only[2]["result"]["isError"], true);
+    assert_eq!(
+        read_only[6]["result"]["structuredContent"]["runs"],
+        json!([
+            {"run":"desk-0000","state":"in progress","stage":"01-draft"},
+            {"run":"work","state":"ready","stage":"01-draft"}
+        ])
+    );
+    let native_queue: Value =
+        serde_json::from_str(&space.ok(&["queue", "--sources", "--json"])).unwrap();
+    assert_eq!(read_only[7]["result"]["structuredContent"], native_queue);
+    assert_eq!(
+        native_queue["tasks"][0]["source_changes"],
+        json!(["data.txt"])
+    );
+    assert_eq!(space.state("work"), before);
+    let writable = run(&["mcp", "--allow-work"]);
+    assert_eq!(writable.len(), 10);
+    assert_eq!(
+        writable[2]["result"]["structuredContent"]["handoff"]["current"]["attempt"],
+        1
+    );
+    assert_eq!(writable[3]["result"]["isError"], false);
+    assert_eq!(
+        writable[4]["result"]["structuredContent"]["current"]["decision"],
+        "Accept the draft?"
+    );
+    assert!(
+        writable[4]["result"]["structuredContent"]["current"]["review_revision"]
+            .as_str()
+            .is_some_and(|id| id.len() == 64)
+    );
+    assert_eq!(writable[5]["result"]["isError"], true);
+    assert_eq!(writable[8]["result"]["isError"], true);
+    assert_eq!(writable[9]["result"]["isError"], true);
+    let tool_names = writable[1]["result"]["tools"].as_array().unwrap();
+    assert!(tool_names.iter().all(|tool| !matches!(
+        tool["name"].as_str(),
+        Some("approve" | "reject" | "approve-batch" | "authorize-review-change")
+    )));
+    assert!(
+        space.state("work")["stages"]["01-draft"]["approvals"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn local_session_uses_the_same_commands_and_recovers_after_command_errors() {
     use std::io::Write;
     let space = Space::new();
@@ -1890,6 +2248,114 @@ fn local_session_uses_the_same_commands_and_recovers_after_command_errors() {
     );
     assert!(out.contains("0 runs, 0 workflows") && out.contains("idle"));
 }
+#[test]
+fn recurring_workflow_uses_learned_review_guidance_and_keeps_unrelated_approvals() {
+    let space = Space::new();
+    let producer = tempfile::tempdir().unwrap();
+    let stages: Vec<_> = ["01-alpha", "02-beta", "03-gamma"].into_iter().enumerate().map(|(index, stage)| {
+        let name = format!("source-{index}.txt");
+        fs::write(producer.path().join(&name), format!("Facts {index}" )).unwrap();
+        json!({"id":stage, "work":"Use the assigned source.", "inputs":[format!("inputs/{name}")],
+            "outputs":[format!("stages/{stage}/outputs/handoff.md")], "review":"Approve this handoff?"})
+    }).collect();
+    space.write(
+        "inbox/definition.json",
+        json!({"stages": stages}).to_string(),
+    );
+    space.ok(&["define", "reports", "--from", "inbox/definition.json"]);
+    space.ok(&[
+        "begin",
+        "reports",
+        "--workflow",
+        "reports",
+        "--brief",
+        "Prepare all three reports",
+        "--source",
+        producer.path().to_str().unwrap(),
+        "--batch-review",
+    ]);
+    let first = "reports-0000";
+    for (stage, attempt) in [("01-alpha", "1"), ("02-beta", "2"), ("03-gamma", "3")] {
+        space.ok(&["next", first]);
+        space.write(
+            &format!("runs/{first}/stages/{stage}/outputs/handoff.md"),
+            "Original draft\n",
+        );
+        space.ok(&["complete", first, stage, "--attempt", attempt]);
+    }
+    space.write(
+        &format!("runs/{first}/stages/01-alpha/outputs/handoff.md"),
+        "Put the finding first\n",
+    );
+    let reviewed = space.ok(&["review", first]);
+    let old = batch_revision(&reviewed);
+    space.ok(&["approve-batch", first, "--revision", &old]);
+    let rule = "Lead with the finding before listing sources.";
+    let learn = [
+        "learn",
+        first,
+        "01-alpha",
+        "--workflow",
+        "reports",
+        "--rule",
+        rule,
+    ];
+    let proposed = space.ok(&learn);
+    let confirmation = proposed
+        .lines()
+        .find_map(|line| line.strip_prefix("Confirmation: "))
+        .unwrap();
+    space.ok(&[learn.as_slice(), &["--confirm", confirmation]].concat());
+    let prior = space.state(first);
+    fs::write(producer.path().join("source-0.txt"), "Updated facts").unwrap();
+    let refresh = space.ok(&["refresh", "reports", "--submit"]);
+    assert!(
+        refresh.contains("kept 2 approvals")
+            && refresh.contains(rule)
+            && refresh.contains("Stage 01-alpha"),
+        "{refresh}"
+    );
+    assert_eq!(space.state(first), prior);
+    let second = "reports-0001";
+    space.write(
+        &format!("runs/{second}/stages/01-alpha/outputs/handoff.md"),
+        "Finding first, using updated facts\n",
+    );
+    space.ok(&["complete", second, "01-alpha", "--attempt", "1"]);
+    let fresh = space.ok(&["review", second]);
+    assert!(
+        fresh.contains("Review 1 exact revisions") && fresh.contains("approved revision"),
+        "{fresh}"
+    );
+    space.fails(
+        &["approve-batch", second, "--revision", &old],
+        "review batch changed",
+    );
+}
+
+#[test]
+fn workspace_scans_ignore_files_added_by_explorer_and_finder() {
+    let space = Space::new();
+    space.brief("report");
+    space.stage("report", "01-draft", &[], None);
+    for path in [
+        "runs/desktop.ini",
+        "runs/.DS_Store",
+        "runs/report/stages/Thumbs.db",
+        "runs/report/stages/._01-draft",
+        "workflows/desktop.ini",
+    ] {
+        space.write(path, "OS metadata fixture");
+    }
+
+    space.ok(&["start", "report"]);
+    assert!(space.ok(&["check"]).contains("1 runs, 0 workflows"));
+    assert!(space.ok(&["status"]).contains("Run report"));
+
+    space.write("runs/report/stages/unexpected.txt", "Not a stage");
+    space.fails(&["check"], "invalid stage unexpected.txt");
+}
+
 #[test]
 fn pending_update_keeps_exact_drafts_and_reopens_only_the_changed_review() {
     let space = Space::new();
@@ -1980,6 +2446,69 @@ fn pending_update_keeps_exact_drafts_and_reopens_only_the_changed_review() {
     );
     space.ok(&["approve-batch", "corrected", "--revision", &fresh]);
     assert!(space.ok(&["next", "corrected"]).contains("Stage 03-join"));
+}
+
+#[test]
+fn pending_update_requires_a_recorded_review_and_keeps_the_approved_baseline() {
+    let space = Space::new();
+    let stage = "01-draft";
+    space.brief("report");
+    let output = space.stage(
+        "report",
+        stage,
+        &["inputs/source.txt"],
+        Some("Approve the draft?"),
+    );
+    let working = format!("runs/report/{output}");
+    space.write("runs/report/inputs/source.txt", "Original input");
+    space.ok(&["start", "report"]);
+    space.ok(&["next", "report"]);
+    space.write(&working, "Available items: 10\n");
+    space.fails(
+        &["update", "report", "blocked", "--pending"],
+        "waiting for review",
+    );
+    assert!(!space.path("runs/blocked").exists());
+
+    let complete = space.ok(&["complete", "report", stage, "--attempt", "1"]);
+    space.ok(&[
+        "approve",
+        "report",
+        stage,
+        "--revision",
+        revision(&complete),
+    ]);
+    let approved = space.state("report");
+    space.write(&working, "Available items: 15\n");
+    space.fails(
+        &["update", "report", "blocked", "--pending"],
+        "unrecorded draft edit",
+    );
+    assert_eq!(space.state("report"), approved);
+    assert!(!space.path("runs/blocked").exists());
+
+    space.ok(&["review", "report"]);
+    let source = space.state("report");
+    space.write("inbox/source.txt", "Corrected input");
+    space.ok(&["update", "report", "corrected", "--pending", "--inbox"]);
+    assert_eq!(
+        space.state("corrected")["update"]["baseline"][stage],
+        approved["stages"][stage]["head"]
+    );
+    space.write(
+        format!("runs/corrected/{output}").as_str(),
+        "Available items: 20\n",
+    );
+    space.ok(&["complete", "corrected", stage, "--attempt", "1"]);
+    let review = space.ok(&["review", "corrected"]);
+    assert!(review.contains("Available items: [-1-]{+2+}0"), "{review}");
+    assert_eq!(space.state("report"), source);
+
+    let mut child = space.state("corrected");
+    child["update"]["baseline"][stage] = source["stages"][stage]["head"].clone();
+    space.write("runs/corrected/.anydock/state.json", child.to_string());
+    let review = space.ok(&["review", "corrected"]);
+    assert!(review.contains("Available items: [-1-]{+2+}0"), "{review}");
 }
 
 #[test]
@@ -2178,6 +2707,144 @@ fn scoped_input_keeps_review_only_when_exact_selected_values_match() {
     space.fails(
         &["approve", "changed", stage, "--revision", original_token],
         "revision changed",
+    );
+}
+
+#[test]
+fn canonical_selected_input_keeps_large_literals_and_rejects_duplicate_leaf_keys() {
+    let space = Space::new();
+    space.brief("work");
+    let path = "inputs/source.json";
+    let out = "stages/01-draft/outputs/handoff.md";
+    space.write(
+        "runs/work/stages/01-draft/stage.md",
+        contract(&json!({"inputs":[path],"outputs":[out],"review":"Accept?",
+        "input_fields":{path:["/selected"]}})),
+    );
+    let source = "runs/work/inputs/source.json";
+    space.write(
+        source,
+        "\u{feff}{\"selected\": { \"n\": 9007199254740993.0, \"a\":[true] }}",
+    );
+    space.ok(&["start", "work"]);
+    let context = space.ok(&["next", "work", "--context"]);
+    assert!(context.contains("9007199254740993.0"));
+    space.write(
+        source,
+        r#"{"selected":{"a":[true],"n":9007199254740993.0}}"#,
+    );
+    space.write(&format!("runs/work/{out}"), "Verified draft");
+    let output = space.ok(&["complete", "work", "01-draft", "--attempt", "1"]);
+    space.ok(&[
+        "approve",
+        "work",
+        "01-draft",
+        "--revision",
+        revision(&output),
+    ]);
+    space.write(
+        source,
+        r#"{"selected":{"a":[true],"n":9007199254740992.0}}"#,
+    );
+    assert!(space.ok(&["status", "work"]).contains("stale"));
+    space.write(
+        source,
+        r#"{"selected":{"a":[{"k":1,"k":2}],"n":9007199254740993.0}}"#,
+    );
+    assert!(space.ok(&["status", "work"]).contains("duplicate key"));
+}
+
+#[test]
+fn legacy_scoped_state_and_explicit_exact_keep_the_original_hashing_basis() {
+    for (name, explicit) in [("legacy", false), ("exact", true)] {
+        let space = Space::new();
+        space.brief(name);
+        let input = "inputs/source.json";
+        let output = "stages/01-draft/outputs/handoff.md";
+        let mut fields = json!({"inputs":[input],"outputs":[output],"review":"Accept?","input_fields":{input:["/selected"]}});
+        if explicit {
+            fields["input_value_format"] = json!("exact");
+        }
+        space.write(
+            &format!("runs/{name}/stages/01-draft/stage.md"),
+            contract(&fields),
+        );
+        let source = format!("runs/{name}/{input}");
+        space.write(&source, r#"{"selected":{"a":1, "b":2}}"#);
+        space.ok(&["start", name]);
+        if !explicit {
+            let mut state = space.state(name);
+            state
+                .as_object_mut()
+                .unwrap()
+                .remove("scoped_input_default");
+            space.write(
+                &format!("runs/{name}/.anydock/state.json"),
+                state.to_string(),
+            );
+        }
+        space.ok(&["next", name]);
+        space.write(&format!("runs/{name}/{output}"), "Verified draft");
+        let before = space.ok(&["complete", name, "01-draft", "--attempt", "1"]);
+        space.ok(&["approve", name, "01-draft", "--revision", revision(&before)]);
+        let approved = space.state(name);
+        assert!(space.ok(&["status", name]).contains("is complete"));
+        assert_eq!(space.state(name), approved);
+        space.write(&source, r#"{"selected": {"b":2,"a":1}}"#);
+        assert!(space.ok(&["status", name]).contains("stale"));
+        assert_eq!(space.state(name), approved);
+    }
+}
+
+#[test]
+fn review_handoff_and_daily_present_the_same_decision_revision() {
+    let space = Space::new();
+    space.brief("review");
+    let output = space.stage("review", "01-draft", &[], Some("Accept these values?"));
+    space.ok(&["start", "review"]);
+    space.ok(&["next", "review"]);
+    space.write(&format!("runs/review/{output}"), "Draft to verify");
+    space.ok(&["complete", "review", "01-draft", "--attempt", "1"]);
+    let report = space.ok(&["review", "review"]);
+    let token = revision(&report);
+    let state = space.state("review");
+    let archive = state["stages"]["01-draft"]["head"].as_str().unwrap();
+    assert_ne!(archive, token);
+    let handoff = space.ok(&["handoff", "review"]);
+    assert_eq!(revision(&handoff), token);
+    let status = space.ok(&["status", "review"]);
+    assert_eq!(revision(&status), token);
+    space.write("feeds/data.txt", "Current values");
+    space.ok(&["daily", "--feed", "numbers=feeds"]);
+    let brief = fs::read_to_string(space.path("briefs/daily.md")).unwrap();
+    assert!(brief.contains(token));
+    for text in [&report, &handoff, &status, &brief] {
+        assert!(!text.contains(archive));
+    }
+    space.fails(
+        &["review", "review", "--interactive"],
+        "requires a human terminal confirmation",
+    );
+    assert_eq!(space.state("review"), state);
+}
+
+#[test]
+fn review_warns_when_a_linked_appendix_is_outside_the_reviewed_revision() {
+    let space = Space::new();
+    space.brief("work");
+    let output = space.stage("work", "01-draft", &[], Some("Accept?"));
+    space.ok(&["start", "work"]);
+    space.ok(&["next", "work"]);
+    space.write("runs/work/inputs/Q4 Appendix.md", "Untracked evidence");
+    space.write(
+        &format!("runs/work/{output}"),
+        "[Appendix](../../../inputs/Q4%20Appendix.md)\n",
+    );
+    space.ok(&["complete", "work", "01-draft", "--attempt", "1"]);
+    let report = space.ok(&["review", "work"]);
+    assert!(
+        report.contains("inputs/Q4 Appendix.md, whose bytes are outside this review."),
+        "{report}"
     );
 }
 
@@ -2936,6 +3603,8 @@ fn recurring_source_is_snapshotted_and_recovers_without_inbox_copies() {
     )
     .unwrap();
     receiving.ok(&["unpack", "portable", "imported"]);
+    assert!(receiving.path(".anydock/bundle-import.lock").is_file());
+    assert!(!receiving.path(".anydock/.anydock").exists());
     let review = receiving.ok(&["review", "imported"]);
     assert!(review.contains("Approve the source values?"));
     assert!(review.contains(&format!("runs/imported/{output}")));
@@ -3071,6 +3740,39 @@ fn daily_brief_preserves_source_values_review_state_and_notes() {
         fs::read_to_string(space.path("briefs/notes.md")).unwrap(),
         "Personal notes"
     );
+}
+
+#[test]
+fn daily_reads_nested_sources_and_preserves_only_meaningful_report_edits() {
+    let space = Space::new();
+    space.write("producer/nested/sub/data.json", "{\"count\":31}\n");
+    space.write("producer/auto/report.txt", "Fresh summary\n");
+    for name in ["desktop.ini", ".DS_Store", "Thumbs.db", "._report.txt"] {
+        space.write(&format!("producer/auto/{name}"), "Metadata fixture");
+    }
+    space.write(
+        ".anydock/daily.json",
+        json!({"feeds": [
+            {"name":"nested", "folder":"producer/nested", "stale_after_hours":24,
+             "files":["sub/data.json"]},
+            {"name":"automatic", "folder":"producer/auto", "stale_after_hours":24}
+        ]})
+        .to_string(),
+    );
+    space.ok(&["daily"]);
+    let report = space.path("briefs/daily.md");
+    let first = fs::read_to_string(&report).unwrap();
+    assert!(first.contains("sub/data.json"));
+    assert!(first.contains("{\"count\":31}"));
+    assert!(first.contains("Fresh summary"));
+    assert!(!first.contains("Metadata fixture"));
+
+    fs::write(&report, first.replace('\n', "\r\n")).unwrap();
+    space.ok(&["daily"]);
+    let edited = format!("{}\r\nMy morning notes\r\n", first.replace('\n', "\r\n"));
+    fs::write(&report, &edited).unwrap();
+    space.fails(&["daily"], "contains edits or is user-owned");
+    assert_eq!(fs::read_to_string(&report).unwrap(), edited);
 }
 
 #[test]

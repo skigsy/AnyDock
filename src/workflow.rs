@@ -87,7 +87,7 @@ pub fn instantiate(space: &Workspace, run: &Path, name: &str) -> Result<()> {
                 && existing
                     .iter()
                     .zip(&stages)
-                    .all(|(a, b)| a.id == b.id && a.contract == b.contract),
+                    .all(|(a, b)| a.id == b.id && a.contract == b.contract && a.format == b.format),
             "run already has different stage definitions"
         );
     }
@@ -189,7 +189,7 @@ impl Snapshot {
         let stages: Vec<_> = self
             .stages
             .iter()
-            .map(|stage| (stage.contract_path(), hash(&stage.contract)))
+            .flat_map(Stage::definition_hashes)
             .collect();
         let references: BTreeMap<_, _> = self
             .references
@@ -199,7 +199,7 @@ impl Snapshot {
         Ok(hash(&serde_json::to_vec(&(stages, references))?))
     }
 
-    fn load(folder: &Path) -> Result<Self> {
+    pub fn load(folder: &Path) -> Result<Self> {
         let mut stages = load_stages(folder)?;
         validate_stages(folder, &stages)?;
         let mut references = read_references(folder, &stages)?;
@@ -211,7 +211,7 @@ impl Snapshot {
                 continue;
             }
             let target = (1..)
-                .map(|number| format!("references/anydock/{}/review-{number}.md", stage.id))
+                .map(|number| guidance_reference(&stage.id, number))
                 .find(|path| !references.contains_key(path))
                 .context("allocate a stage guidance path")?;
             stage.attach_reference(&target)?;
@@ -219,6 +219,59 @@ impl Snapshot {
         }
         Ok(Self { stages, references })
     }
+}
+
+fn guidance_reference(stage: &str, number: u32) -> String {
+    format!("references/anydock/{stage}/review-{number}.md")
+}
+
+pub fn apply_guidance(space: &Workspace, name: &str, run: &Path) -> Result<()> {
+    let workflow = space.workflow(name)?;
+    if !workflow.try_exists()? {
+        println!("Saved workflow {name} is unavailable. Keeping the run's pinned guidance.");
+        return Ok(());
+    }
+    let saved = load_stages(&workflow)?;
+    let declared = saved
+        .iter()
+        .flat_map(|stage| &stage.fields.references)
+        .map(|entry| entry.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let plan = Plan::load(run)?;
+    for mut stage in plan.stages {
+        let guidance = guidance_path(&stage.id);
+        let Some(bytes) = reference::bytes(&workflow, &guidance)? else {
+            continue;
+        };
+        if std::str::from_utf8(&bytes)?.trim().is_empty() {
+            continue;
+        }
+        let path = (1..)
+            .map(|index| guidance_reference(&stage.id, index))
+            .find(|path| !declared.contains(path.as_str()))
+            .context("allocate a stage guidance path")?;
+        let prior = stage
+            .fields
+            .references
+            .iter()
+            .find(|entry| entry.path == path && entry.section.is_none());
+        if let Some(prior) = prior {
+            if reference::bytes(run, &prior.path)?.as_deref() != Some(&bytes) {
+                reference::write(run, &prior.path, &bytes, true)?;
+            }
+        } else {
+            stage.attach_reference(&path)?;
+            reference::write(run, &path, &bytes, false)?;
+            let path = file(run, &stage.contract_path())?;
+            let mut contract = fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path)?;
+            contract.write_all(&stage.contract)?;
+            contract.sync_all()?;
+        }
+    }
+    Ok(())
 }
 
 fn read_references(root: &Path, stages: &[Stage]) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -244,6 +297,9 @@ fn write_definitions(dest: &Path, stages: &[Stage]) -> Result<()> {
         let mut file = fs::File::create_new(file)?;
         file.write_all(&stage.contract)?;
         file.sync_all()?;
+        if let Some(bytes) = stage.format_bytes() {
+            crate::workspace::write_new(&folder.join("contract-format"), &bytes)?;
+        }
         sync_dir(&folder)?;
     }
     sync_dir(&base)?;

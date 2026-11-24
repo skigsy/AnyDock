@@ -7,7 +7,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 #[derive(Serialize)]
-struct Queue {
+pub struct Queue {
     schema: u32,
     tasks: Vec<Task>,
 }
@@ -40,7 +40,7 @@ struct Review {
     gates: Option<String>,
 }
 
-pub fn show(space: &Workspace, all: bool, json: bool, sources: bool) -> Result<()> {
+pub fn collect(space: &Workspace, all: bool, sources: bool) -> Result<Queue> {
     let mut tasks = Vec::new();
     for name in recurring::tracked_names(space)? {
         match inspect(space, &name, sources) {
@@ -65,13 +65,16 @@ pub fn show(space: &Workspace, all: bool, json: bool, sources: bool) -> Result<(
         "done" => 3,
         _ => 2,
     });
+    Ok(Queue { schema: 1, tasks })
+}
+
+pub fn show(space: &Workspace, all: bool, json: bool, sources: bool) -> Result<()> {
+    let queue = collect(space, all, sources)?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&Queue { schema: 1, tasks })?
-        );
+        println!("{}", serde_json::to_string_pretty(&queue)?);
         return Ok(());
     }
+    let tasks = queue.tasks;
     if tasks.is_empty() {
         println!("No recurring tasks need attention.");
     }
@@ -114,6 +117,7 @@ fn inspect(space: &Workspace, name: &str, sources: bool) -> Result<Option<Task>>
     let run = current.run;
     let mut state = current.state;
     let root = space.run(&run)?;
+    let command = crate::workspace::invocation(&space.root);
     let plan = Plan::load(&root)?;
     state.verify_archives(&root, false)?;
     let mut task = Task {
@@ -145,7 +149,7 @@ fn inspect(space: &Workspace, name: &str, sources: bool) -> Result<Option<Task>>
                 None => format!("{} removes {:?}.", change.stage, change.previous),
             })
             .collect();
-        task.next = Some(format!("anydock status {run}"));
+        task.next = Some(format!("{command} status {run}"));
         return Ok(Some(task));
     }
 
@@ -155,10 +159,10 @@ fn inspect(space: &Workspace, name: &str, sources: bool) -> Result<Option<Task>>
         task.state = item.phase.label();
         task.reasons.clone_from(&item.reasons);
         task.next = Some(match item.phase {
-            Phase::Review => format!("anydock review {run}"),
-            Phase::Ready | Phase::Running => format!("anydock next {run} --context"),
-            Phase::Stale if item.basis.is_some() => format!("anydock next {run} --retry"),
-            _ => format!("anydock status {run} --inspect"),
+            Phase::Review => format!("{command} review {run}"),
+            Phase::Ready | Phase::Running => format!("{command} next {run} --context"),
+            Phase::Stale if item.basis.is_some() => format!("{command} next {run} --retry"),
+            _ => format!("{command} status {run}"),
         });
         if item.phase == Phase::Review {
             task.reviews = view
@@ -192,7 +196,7 @@ fn inspect(space: &Workspace, name: &str, sources: bool) -> Result<Option<Task>>
             task.state = "source unavailable";
         } else if !task.source_changes.is_empty() {
             task.state = "source changed";
-            task.next = Some(format!("anydock refresh {name} --submit"));
+            task.next = Some(format!("{command} refresh {name} --submit"));
         }
     }
     Ok(Some(task))

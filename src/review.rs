@@ -156,6 +156,9 @@ pub fn batch(
         }
         let baseline = prior.map(|(p, (_, revision))| (p.path.as_path(), revision));
         gate(space, path, state, target, item, false, baseline)?;
+        if let Some(next) = view.first_gated_by(item.stage, state.batch_review) {
+            println!("Gates: {next}");
+        }
     }
     if !state.review_presentations.contains_key(&token) {
         state.review_presentations.insert(token.clone(), pending);
@@ -163,10 +166,57 @@ pub fn batch(
     }
     println!("Batch revision: {token}");
     println!(
-        "If approved: anydock approve-batch {} --revision {token}",
-        target.selector()
+        "If approved: {} approve-batch {} --revision {}",
+        crate::workspace::invocation(&space.root),
+        target.selector(),
+        command_token(&token, batch_tokens(state))
     );
     Ok(())
+}
+
+const SHORT_TOKEN: usize = 12;
+
+pub fn batch_tokens(state: &State) -> impl Iterator<Item = &String> {
+    state
+        .review_presentations
+        .keys()
+        .chain(state.last_batch.iter())
+}
+
+pub fn stage_tokens<'a>(state: &'a State, stage: &'a str) -> impl Iterator<Item = String> + 'a {
+    state
+        .stages
+        .get(stage)
+        .into_iter()
+        .flat_map(|entry| entry.revisions.keys())
+        .filter_map(|archive| state.review_token(stage, archive))
+}
+
+fn command_token(current: &str, known: impl IntoIterator<Item = impl AsRef<str>>) -> &str {
+    let short = &current[..SHORT_TOKEN];
+    if matches_token(short, current, known) {
+        short
+    } else {
+        current
+    }
+}
+
+pub fn matches_token(
+    supplied: &str,
+    current: &str,
+    known: impl IntoIterator<Item = impl AsRef<str>>,
+) -> bool {
+    supplied == current
+        || (supplied.len() >= SHORT_TOKEN
+            && current.starts_with(supplied)
+            && !known.into_iter().any(|candidate| {
+                let candidate = candidate.as_ref();
+                candidate != current && candidate.starts_with(supplied)
+            }))
+}
+
+pub fn valid_note(note: &str) -> bool {
+    !note.trim().is_empty() && note.len() <= 1024 && !note.chars().any(char::is_control)
 }
 
 pub fn pending_batch(view: &View<'_>, state: &State) -> Result<(String, ReviewSet)> {
@@ -217,16 +267,68 @@ pub fn gate(
         }
         print_delta(&prior.path, run, &prior.revision, current, id)?;
     } else {
-        for path in current.outputs.keys() {
+        if state
+            .update
+            .as_ref()
+            .is_some_and(|update| update.baseline.contains_key(stage))
+        {
+            println!("Prior approved archive unavailable. Review the full current files.");
+        }
+        for (path, digest) in &current.outputs {
             println!("Review full file: runs/{id}/{path}");
+            print_first_draft(run, digest)?;
         }
     }
+    warn_unbound_links(run, current, item)?;
     if individual {
         println!("Revision: {token}");
         println!(
-            "If approved: anydock approve {} {stage} --revision {token}",
-            target.selector()
+            "If approved: {} approve {} {stage} --revision {}",
+            crate::workspace::invocation(&space.root),
+            target.selector(),
+            command_token(&token, stage_tokens(state, stage))
         );
+    }
+    Ok(())
+}
+
+fn warn_unbound_links(run: &Path, revision: &Revision, item: &StageView<'_>) -> Result<()> {
+    let mut warnings = BTreeSet::new();
+    for (path, digest) in revision
+        .outputs
+        .iter()
+        .filter(|(path, _)| path.ends_with(".md"))
+    {
+        if let Some(markdown) = text_file(&verified_blob(run, digest)?)? {
+            for target in crate::quality::markdown_targets(path, &markdown) {
+                match target {
+                    Ok(target)
+                        if revision.outputs.contains_key(&target)
+                            || (revision.basis.contains_key(&target)
+                                && !item.stage.fields.input_fields.contains_key(&target)) => {}
+                    Ok(target) => {
+                        warnings.insert(format!(
+                            "{path} links to {target}, whose bytes are outside this review."
+                        ));
+                    }
+                    Err(error) => {
+                        warnings.insert(format!(
+                            "{path} contains an unverified file link. {error:#}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for warning in warnings.into_iter().take(8) {
+        println!("Review warning: {warning}");
+    }
+    Ok(())
+}
+
+fn print_first_draft(run: &Path, digest: &str) -> Result<()> {
+    if let Some(text) = text_file(&verified_blob(run, digest)?)? {
+        print_preview(&text.lines().collect::<Vec<_>>(), 240);
     }
     Ok(())
 }
@@ -244,12 +346,7 @@ fn approved_baseline(
     stage: &str,
 ) -> Option<ApprovedBaseline> {
     let entry = state.stages.get(stage)?;
-    if let Some(previous) = entry
-        .order
-        .iter()
-        .rev()
-        .find(|key| entry.approvals.contains(*key))
-    {
+    if let Some(previous) = entry.last_approved() {
         return Some(ApprovedBaseline {
             path: run.to_owned(),
             revision: entry.revisions.get(previous)?.clone(),
@@ -264,9 +361,7 @@ fn approved_baseline(
         return None;
     }
     let entry = prior.stages.get(stage)?;
-    if !entry.approvals.contains(previous) {
-        return None;
-    }
+    let previous = entry.approved_at_or_before(previous)?;
     Some(ApprovedBaseline {
         path: source,
         revision: entry.revisions.get(previous)?.clone(),
@@ -292,6 +387,15 @@ pub fn approved_changes(
     };
     let current = &state.stages[&item.stage.id].revisions[revision];
     let Some(baseline) = approved_baseline(space, run, state, &item.stage.id) else {
+        if state
+            .update
+            .as_ref()
+            .is_some_and(|update| update.baseline.contains_key(&item.stage.id))
+        {
+            for file in current.outputs.keys() {
+                changes.push(unavailable_baseline(file));
+            }
+        }
         return Ok(changes);
     };
     for (file, digest) in &current.outputs {
@@ -299,6 +403,7 @@ pub fn approved_changes(
             continue;
         };
         let Ok(prior_file) = verified_blob(&baseline.path, previous) else {
+            changes.push(unavailable_baseline(file));
             continue;
         };
         let current_file = verified_blob(run, digest)?;
@@ -325,6 +430,14 @@ pub fn approved_changes(
     Ok(changes)
 }
 
+fn unavailable_baseline(file: &str) -> ChangePreview {
+    ChangePreview {
+        file: file.to_owned(),
+        lines: vec!["Prior approved archive unavailable. Open the full current file.".into()],
+        truncated: false,
+    }
+}
+
 fn print_delta(
     prior_run: &Path,
     run: &Path,
@@ -336,6 +449,7 @@ fn print_delta(
         let current = verified_blob(run, digest)?;
         let Some(previous) = prior.outputs.get(name) else {
             println!("Review new file: runs/{id}/{name}");
+            print_first_draft(run, digest)?;
             continue;
         };
         let Ok(prior_file) = verified_blob(prior_run, previous) else {
@@ -349,7 +463,7 @@ fn print_delta(
         {
             print_review_delta(&before, &after);
         } else {
-            println!("Digest: {previous} -> {digest}. Open the file to review it.");
+            println!("File changed. Open it to review the current contents.");
         }
     }
     Ok(())

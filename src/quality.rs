@@ -1,8 +1,8 @@
 use crate::{
     storage::{Hashes, hash},
-    workspace::{Stage, file, segment},
+    workspace::{Stage, file, input_component},
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use pulldown_cmark::{Event, Parser, Tag};
 use serde::Deserialize;
 use std::{collections::BTreeSet, fs, path::Path};
@@ -123,46 +123,84 @@ pub fn run(run: &Path, stage: &Stage, outputs: &Hashes) -> (Vec<String>, Vec<Str
 }
 
 fn markdown_links(run: &Path, output: &str, markdown: &str) -> Result<()> {
-    for event in Parser::new(markdown) {
-        let Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) = event else {
-            continue;
-        };
-        let target = dest_url.split('#').next().unwrap_or_default();
-        if target.is_empty()
-            || ["https://", "http://", "mailto:", "tel:"]
-                .iter()
-                .any(|scheme| target.starts_with(scheme))
-        {
-            continue;
-        }
-        ensure!(
-            !target.starts_with('/'),
-            "expected a run-local relative link, found {target:?}"
-        );
-        let (parent, _) = output.rsplit_once('/').context("invalid output path")?;
-        let mut components: Vec<_> = parent.split('/').collect();
-        for part in target.split('/') {
-            match part {
-                "." => {}
-                ".." => {
-                    components
-                        .pop()
-                        .with_context(|| format!("link escapes the run: {target:?}"))?;
-                }
-                _ => {
-                    segment(part).with_context(|| format!("invalid link target {target:?}"))?;
-                    components.push(part);
-                }
-            }
-        }
-        if components.is_empty() {
-            bail!("link does not name a file: {target:?}");
-        }
-        let relative = components.join("/");
+    for relative in markdown_targets(output, markdown) {
+        let relative = relative?;
         ensure!(
             file(run, &relative)?.try_exists()?,
             "missing linked file {relative}"
         );
     }
     Ok(())
+}
+
+pub fn markdown_targets<'a>(
+    output: &'a str,
+    markdown: &'a str,
+) -> impl Iterator<Item = Result<String>> + 'a {
+    Parser::new(markdown).filter_map(move |event| {
+        let Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) = event else {
+            return None;
+        };
+        let target = dest_url.split('#').next()?;
+        if target.is_empty()
+            || ["https://", "http://", "mailto:", "tel:"]
+                .iter()
+                .any(|scheme| target.starts_with(scheme))
+        {
+            return None;
+        }
+        Some(resolve_link(output, target))
+    })
+}
+
+fn resolve_link(output: &str, target: &str) -> Result<String> {
+    ensure!(
+        !target.starts_with('/'),
+        "expected a run-local relative link, found {target:?}"
+    );
+    let (parent, _) = output.rsplit_once('/').context("invalid output path")?;
+    let mut components: Vec<_> = parent.split('/').map(str::to_owned).collect();
+    for part in target.split('/') {
+        let part =
+            decode_url_part(part).with_context(|| format!("invalid link target {target:?}"))?;
+        match part.as_str() {
+            "." => {}
+            ".." => {
+                components
+                    .pop()
+                    .with_context(|| format!("link escapes the run: {target:?}"))?;
+            }
+            _ => {
+                input_component(&part)
+                    .with_context(|| format!("invalid link target {target:?}"))?;
+                components.push(part);
+            }
+        }
+    }
+    ensure!(
+        !components.is_empty(),
+        "link does not name a file: {target:?}"
+    );
+    Ok(components.join("/"))
+}
+
+fn decode_url_part(part: &str) -> Result<String> {
+    let mut decoded = Vec::with_capacity(part.len());
+    let mut bytes = part.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let hi = bytes
+                .next()
+                .and_then(|byte| char::from(byte).to_digit(16))
+                .context("invalid URL escape")?;
+            let lo = bytes
+                .next()
+                .and_then(|byte| char::from(byte).to_digit(16))
+                .context("invalid URL escape")?;
+            decoded.push((hi * 16 + lo) as u8);
+        } else {
+            decoded.push(byte);
+        }
+    }
+    Ok(String::from_utf8(decoded)?)
 }

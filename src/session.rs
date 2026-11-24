@@ -3,7 +3,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Read, Write};
 
-use crate::{Cli, Command, TransferCommand, dispatch};
+use crate::{Cli, Command, TransferCommand, Workspace, dispatch};
 
 const LIMIT: usize = 64 * 1024;
 
@@ -22,7 +22,7 @@ struct Response<'a> {
     error: Option<String>,
 }
 
-pub fn serve() -> Result<()> {
+pub fn serve(space: &Workspace) -> Result<()> {
     let mut input = io::stdin().lock();
     loop {
         let mut line = String::new();
@@ -41,7 +41,7 @@ pub fn serve() -> Result<()> {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
             "invalid session request identifier"
         );
-        let outcome = run(request.args);
+        let outcome = run(space, request.args);
         let response = Response {
             id: &request.id,
             ok: outcome.is_ok(),
@@ -54,14 +54,19 @@ pub fn serve() -> Result<()> {
     Ok(())
 }
 
-fn run(args: Vec<String>) -> Result<()> {
+fn run(space: &Workspace, args: Vec<String>) -> Result<()> {
     let cli = Cli::try_parse_from(std::iter::once("anydock".to_owned()).chain(args))?;
     ensure!(
-        !matches!(
-            cli.command,
-            Command::Session | Command::Transfer(TransferCommand::Switch { .. })
-        ),
+        cli.directory.is_none()
+            && !matches!(
+                cli.command,
+                Command::Init
+                    | Command::Upgrade { .. }
+                    | Command::Session
+                    | Command::Mcp { .. }
+                    | Command::Transfer(TransferCommand::Switch { .. })
+            ),
         "command requires a separate AnyDock process"
     );
-    dispatch(cli.command)
+    dispatch(space, cli.command)
 }

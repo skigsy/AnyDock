@@ -2,14 +2,14 @@ use crate::{
     engine::{self, Phase},
     policy,
     storage::{LockedRun, State, verified_blob},
-    workspace::{PROGRESS, Plan, file},
+    workspace::{PROGRESS, Plan, Workspace, file, names},
 };
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{fs, io::Read, path::Path};
 
 #[derive(Serialize)]
-struct Handoff {
+pub struct Handoff {
     schema: u32,
     run: String,
     mode: &'static str,
@@ -17,12 +17,18 @@ struct Handoff {
     brief: String,
     progress: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     updated: Option<Update>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch_revision: Option<String>,
     completed: Vec<Stage>,
     current: Option<Stage>,
     waiting: Vec<Stage>,
     changes: Vec<Change>,
     next: String,
+    #[serde(skip)]
+    policy_blocked: bool,
 }
 
 #[derive(Serialize)]
@@ -48,6 +54,8 @@ struct Stage {
     reasons: Vec<String>,
     checks: Vec<String>,
     decision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_revision: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -57,7 +65,54 @@ struct Change {
     previous: Option<String>,
 }
 
-pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
+#[derive(Serialize)]
+pub struct Overview {
+    schema: u32,
+    runs: Vec<RunSummary>,
+}
+
+#[derive(Serialize)]
+struct RunSummary {
+    run: String,
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+pub fn overview(space: &Workspace) -> Result<Overview> {
+    let runs = names(&space.root, "runs")?
+        .into_iter()
+        .map(
+            |run| match space.run(&run).and_then(|path| collect(&path, &run)) {
+                Ok(report) => RunSummary {
+                    run,
+                    state: report.current.as_ref().map_or_else(
+                        || match report.mode {
+                            "managed" if report.policy_blocked => "review policy change",
+                            "managed" => "complete",
+                            other => other,
+                        },
+                        |stage| stage.state,
+                    ),
+                    stage: report.current.map(|stage| stage.id),
+                    error: None,
+                },
+                Err(error) => RunSummary {
+                    run,
+                    state: "unavailable",
+                    stage: None,
+                    error: Some(format!("{error:#}")),
+                },
+            },
+        )
+        .collect();
+    Ok(Overview { schema: 1, runs })
+}
+
+pub fn collect(run: &Path, id: &str) -> Result<Handoff> {
+    let command = crate::workspace::run_invocation(run);
     ensure!(run.try_exists()?, "run {id} does not exist");
     let prefix = |name: &str| format!("runs/{id}/{name}");
     let mut result = Handoff {
@@ -67,13 +122,18 @@ pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
         instructions: "AGENTS.md",
         brief: prefix("brief.md"),
         progress: None,
+        notes: file(run, "notes.md")?
+            .try_exists()?
+            .then(|| prefix("notes.md")),
         updated: None,
+        batch_revision: None,
         completed: Vec::new(),
         current: None,
         waiting: Vec::new(),
         changes: Vec::new(),
         next: "Read the brief and stage definitions. Register only when execution is authorized."
             .into(),
+        policy_blocked: false,
     };
     if let Some(mut state) = LockedRun::inspect(run)? {
         result.mode = "managed";
@@ -94,7 +154,7 @@ pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
                 reused_from: state.update.as_ref().and_then(|update| {
                     let revision = update.reused.get(&item.stage.id)?;
                     (item.revision.as_deref() == Some(&revision.revision))
-                        .then(|| format!("runs/{} | {}", update.from, revision.from))
+                        .then(|| format!("runs/{}", update.from))
                 }),
                 attempt: item.attempt,
                 checkpoint: state
@@ -115,7 +175,13 @@ pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
                     .fields
                     .input_fields
                     .keys()
-                    .map(|name| format!("anydock input {id} {} {name}", item.stage.id))
+                    .map(|name| {
+                        format!(
+                            "{command} input {id} {} {}",
+                            item.stage.id,
+                            crate::workspace::shell_word(name)
+                        )
+                    })
                     .collect(),
                 references: item
                     .stage
@@ -134,7 +200,15 @@ pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
                 reasons: item.reasons.clone(),
                 checks: item.checks.clone(),
                 decision: item.stage.fields.review.clone(),
+                review_revision: (item.phase == Phase::Review && !state.batch_review)
+                    .then(|| state.review_token(&item.stage.id, item.revision.as_deref()?))
+                    .flatten(),
             };
+            if state.batch_review {
+                result.batch_revision = crate::review::pending_batch(&view, &state)
+                    .ok()
+                    .map(|(revision, _)| revision);
+            }
             result.completed = view
                 .stages
                 .iter()
@@ -151,7 +225,7 @@ pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
                     .collect();
                 result.next = match item.phase {
                     Phase::Ready | Phase::Running => {
-                        format!("If execution is authorized, run anydock next {id}.")
+                        format!("If execution is authorized, run {command} next {id}.")
                     }
                     Phase::Review => {
                         if let Some(presentation) = state
@@ -160,17 +234,17 @@ pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
                             .and_then(|update| update.presentation.as_ref())
                         {
                             format!(
-                                "If the human has seen the earlier presentation, use anydock review {id} --since {}. Otherwise use anydock review {id}.",
+                                "If the human has seen the earlier presentation, use {command} review {id} --since {}. Otherwise use {command} review {id}.",
                                 presentation.token
                             )
                         } else {
                             format!(
-                                "Present the review decision. Run anydock status {id} to record live edits and show the current review revision."
+                                "Present the review decision. Run {command} review {id} to record live edits and show the current review revision."
                             )
                         }
                     }
                     Phase::Stale if item.basis.is_some() => format!(
-                        "Inspect the changed files. If rework is authorized, run anydock next {id} --retry, then recheck review."
+                        "Inspect the changed files. If rework is authorized, run {command} next {id} --retry, then recheck review."
                     ),
                     _ => "Resolve the listed blockers.".into(),
                 };
@@ -202,6 +276,7 @@ pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
                 result.next = "Run complete. Review the handoffs.".into();
             }
         } else {
+            result.policy_blocked = true;
             result.next = format!(
                 "Review requirement changed for {}. Restore it or ask the human to authorize the exact policy change.",
                 changes
@@ -216,7 +291,11 @@ pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
         result.progress = Some(prefix(PROGRESS));
         result.next = "Read the brief, progress record, and current stage. Verify the recorded digests and preserve the human review gate.".into();
     }
+    Ok(result)
+}
 
+pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
+    let result = collect(run, id)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
@@ -224,6 +303,9 @@ pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
         println!("Read: {} and {}", result.instructions, result.brief);
         if let Some(progress) = &result.progress {
             println!("Progress: {progress}");
+        }
+        if let Some(notes) = &result.notes {
+            println!("Notes: {notes}");
         }
         if let Some(update) = &result.updated {
             println!("Updated from: {}", update.from);
@@ -269,6 +351,9 @@ pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
             if let Some(decision) = &stage.decision {
                 println!("Human review: {decision}");
             }
+            if let Some(revision) = &stage.review_revision {
+                println!("Revision: {revision}");
+            }
         }
         for stage in &result.waiting {
             println!("Waiting {} | {}", stage.id, stage.state);
@@ -283,6 +368,9 @@ pub fn show(run: &Path, id: &str, json: bool) -> Result<()> {
             }
             println!("Current text, {}:", change.file);
             println!("{}", change.excerpt);
+        }
+        if let Some(revision) = &result.batch_revision {
+            println!("Batch revision: {revision}");
         }
         println!("Next: {}", result.next);
     }

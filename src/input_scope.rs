@@ -1,12 +1,20 @@
 use crate::workspace::{file, optional};
 use anyhow::{Context, Result, bail, ensure};
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::value::RawValue;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
     path::Path,
 };
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Format {
+    Exact,
+    #[default]
+    CanonicalV1,
+}
 
 pub fn validate(name: &str, pointers: &[String]) -> Result<()> {
     ensure!(!pointers.is_empty(), "{name} has no selected JSON fields");
@@ -28,21 +36,61 @@ pub fn validate(name: &str, pointers: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub fn read(root: &Path, name: &str, pointers: &[String]) -> Result<Option<Vec<u8>>> {
+pub fn read(
+    root: &Path,
+    name: &str,
+    pointers: &[String],
+    format: Format,
+) -> Result<Option<Vec<u8>>> {
     let Some(bytes) =
         optional(fs::read(file(root, name)?)).with_context(|| format!("read input {name}"))?
     else {
         return Ok(None);
     };
-    let document: &RawValue =
-        serde_json::from_slice(&bytes).with_context(|| format!("{name} contains invalid JSON"))?;
+    let document = parse(&bytes).with_context(|| format!("{name} contains invalid JSON"))?;
     let mut fields = BTreeMap::new();
     for pointer in pointers {
         let value = select(document, pointer)
             .with_context(|| format!("{name} at JSON pointer {pointer:?}"))?;
-        fields.insert(pointer, value);
+        let normalized =
+            canonical(value).with_context(|| format!("{name} at JSON pointer {pointer:?}"))?;
+        fields.insert(
+            pointer,
+            match format {
+                Format::Exact => value.to_owned(),
+                Format::CanonicalV1 => normalized,
+            },
+        );
     }
     Ok(Some(serde_json::to_vec_pretty(&fields)?))
+}
+
+pub(crate) fn parse(bytes: &[u8]) -> serde_json::Result<&RawValue> {
+    serde_json::from_slice(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes))
+}
+
+fn canonical(value: &RawValue) -> serde_json::Result<Box<RawValue>> {
+    use serde_json::value::to_raw_value;
+    match value.get().as_bytes().first() {
+        Some(b'{') => {
+            let fields = serde_json::from_str::<Object<'_>>(value.get())?
+                .0
+                .into_iter()
+                .map(|(key, value)| Ok((key, canonical(value)?)))
+                .collect::<serde_json::Result<BTreeMap<_, _>>>()?;
+            to_raw_value(&fields)
+        }
+        Some(b'[') => {
+            let entries = serde_json::from_str::<Vec<&RawValue>>(value.get())?
+                .into_iter()
+                .map(canonical)
+                .collect::<serde_json::Result<Vec<_>>>()?;
+            to_raw_value(&entries)
+        }
+        Some(b'"') => to_raw_value(&serde_json::from_str::<String>(value.get())?),
+        // Keep the source's exact numeric literal instead of rounding through f64.
+        _ => Ok(value.to_owned()),
+    }
 }
 
 pub(crate) fn select<'a>(mut value: &'a RawValue, pointer: &str) -> Result<&'a RawValue> {

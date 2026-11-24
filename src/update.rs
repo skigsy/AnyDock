@@ -51,14 +51,24 @@ pub fn create(
     policy::require_current(prior, plan)?;
     prior.verify_archives(previous, false)?;
     let view = engine::evaluate(previous, plan, prior, false)?;
-    if pending && submission.is_some() {
+    if pending {
         ensure!(
             !view.stages.iter().any(|item| item.attempt.is_some())
                 && view
                     .action(prior.batch_review)
                     .is_some_and(|item| item.phase == Phase::Review),
-            "a pending refresh requires the source task to be waiting for review"
+            "a pending refresh requires the source run to be waiting for review"
         );
+        if let Some(item) = view
+            .stages
+            .iter()
+            .find(|item| item.phase == Phase::Review && item.revision.is_none())
+        {
+            anyhow::bail!(
+                "{} has an unrecorded draft edit. Present the current review for {from} before updating",
+                item.stage.id
+            );
+        }
     }
     if !pending && let Some(stage) = view.front() {
         anyhow::bail!(
@@ -71,13 +81,13 @@ pub fn create(
         from: from.into(),
         identity: prior.identity.clone().context("missing source identity")?,
         inputs: BTreeSet::new(),
-        baseline: view
+        baseline: prior
             .stages
             .iter()
-            .filter_map(|item| {
-                item.revision
-                    .clone()
-                    .map(|revision| (item.stage.id.clone(), revision))
+            .filter_map(|(stage, entry)| {
+                entry
+                    .last_approved()
+                    .map(|revision| (stage.clone(), revision.to_owned()))
             })
             .collect(),
         reused: BTreeMap::new(),
@@ -85,6 +95,7 @@ pub fn create(
         submission: submission.cloned(),
     };
     let mut state = State::new(prior.workflow.clone())?;
+    state.scoped_input_default = prior.scoped_input_default;
     state.batch_review = prior.batch_review;
     let scratch = directory(&space.root, ".anydock")?;
     fs::create_dir_all(&scratch)?;
@@ -96,7 +107,7 @@ pub fn create(
 
     let mut definitions = BTreeMap::from([(BRIEF.into(), hash(&plan.brief))]);
     for stage in &plan.stages {
-        definitions.insert(stage.contract_path(), hash(&stage.contract));
+        definitions.extend(stage.definition_hashes());
         for reference in &stage.fields.references {
             let path = &reference.path;
             let digest = required_hash(previous, path)?;
@@ -105,6 +116,12 @@ pub fn create(
     }
     for (name, digest) in definitions {
         copy_exact(&file(previous, &name)?, &file(staged, &name)?, &digest)?;
+    }
+    if submission.is_some()
+        && !pending
+        && let Some(workflow) = &prior.workflow
+    {
+        crate::workflow::apply_guidance(space, workflow, staged)?;
     }
     for name in external {
         let old = required_hash(previous, name)?;
@@ -209,14 +226,21 @@ pub fn create(
             println!("Write: runs/{id}/{output}");
         }
         println!(
-            "After verification: anydock complete {id} {} --attempt {attempt}",
+            "After verification: {} complete {id} {} --attempt {attempt}",
+            crate::workspace::invocation(&space.root),
             stage.id
         );
-        stage_context::show(&target, id, &plan, stage)?;
+        stage_context::show(&target, id, &plan, stage, state.input_format(stage))?;
     } else if view.stages.iter().any(|item| item.phase == Phase::Review) {
-        println!("Pending review: anydock review {id}");
+        println!(
+            "Pending review: {} review {id}",
+            crate::workspace::invocation(&space.root)
+        );
     } else if view.front().is_some() {
-        println!("Inspect unresolved stages with anydock status {id}.");
+        println!(
+            "Inspect unresolved stages with {} status {id}.",
+            crate::workspace::invocation(&space.root)
+        );
     } else {
         println!("All stages are current. There is no new work to review.");
     }

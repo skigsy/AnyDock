@@ -132,7 +132,7 @@ fn write_task_record(path: &Path, record: &impl Serialize) -> Result<()> {
     serde_json::to_writer_pretty(&mut file, record)?;
     writeln!(file)?;
     file.as_file().sync_all()?;
-    file.persist(path)
+    crate::storage::persist_replace(file, path)
         .with_context(|| format!("update {}", path.display()))?;
     sync_dir(folder)
 }
@@ -175,10 +175,15 @@ fn seed(space: &Workspace, id: &str) -> Result<Head> {
     })
 }
 
+pub enum Definition<'a> {
+    Inbox(&'a str),
+    Saved(&'a str),
+}
+
 pub fn begin(
     space: &Workspace,
     name: &str,
-    definition: &str,
+    definition: Definition<'_>,
     brief: &str,
     inputs: InputSelection<'_>,
     batch_review: bool,
@@ -216,7 +221,10 @@ pub fn begin(
     } else {
         inputs
     };
-    let snapshot = Snapshot::from_definition(space, definition)?;
+    let (snapshot, workflow) = match definition {
+        Definition::Inbox(path) => (Snapshot::from_definition(space, path)?, None),
+        Definition::Saved(name) => (Snapshot::load(&space.workflow(name)?)?, Some(name)),
+    };
     let files = inputs.resolve(&space.root, &external_inputs(&snapshot.stages))?;
     let submitted = input_hashes(&files)?;
     let request = hash(&serde_json::to_vec(&(
@@ -228,6 +236,10 @@ pub fn begin(
     let request = match inputs {
         InputSelection::Source(folder) => hash(&serde_json::to_vec(&(request, folder))?),
         _ => request,
+    };
+    let request = match workflow {
+        Some(name) => hash(&serde_json::to_vec(&(request, name))?),
+        None => request,
     };
 
     if let Some(head) = previous {
@@ -261,7 +273,7 @@ pub fn begin(
         )?;
     }
     let plan = Plan::load(staged)?;
-    let mut state = State::new(None)?;
+    let mut state = State::new(workflow.map(str::to_owned))?;
     state.batch_review = batch_review;
     state.set_recurring_start(RecurringStart {
         task: name.into(),
@@ -297,10 +309,11 @@ pub fn begin(
         println!("Write: runs/{id}/{path}");
     }
     println!(
-        "After verification: anydock complete {id} {} --attempt {attempt}",
+        "After verification: {} complete {id} {} --attempt {attempt}",
+        crate::workspace::invocation(&space.root),
         stage.id
     );
-    stage_context::show(&target, &id, &plan, stage)
+    stage_context::show(&target, &id, &plan, stage, state.input_format(stage))
 }
 
 fn recover_start(space: &Workspace, name: &str) -> Result<Option<Head>> {

@@ -19,7 +19,7 @@ pub fn fork(space: &Workspace, path: &Path, source: &str, dest: &str, state: &St
     state.verify_archives(path, false)?;
     let mut snapshot = BTreeMap::from([(BRIEF.to_owned(), hash(&plan.brief))]);
     for stage in &plan.stages {
-        snapshot.insert(stage.contract_path(), hash(&stage.contract));
+        snapshot.extend(stage.definition_hashes());
         let names = stage
             .fields
             .inputs
@@ -76,7 +76,10 @@ pub fn fork(space: &Workspace, path: &Path, source: &str, dest: &str, state: &St
             .context("missing fork origin")?
             .snapshot
     );
-    println!("Run starts at stage one with its own decisions. Use anydock handoff {dest}.");
+    println!(
+        "Run starts at stage one with its own decisions. Use {} handoff {dest}.",
+        crate::workspace::invocation(&space.root)
+    );
     Ok(())
 }
 
@@ -159,6 +162,9 @@ pub fn compare(space: &Workspace, left: &str, right: &str) -> Result<()> {
             }
         }
     }
-    println!("Select the preferred run's eligible files with anydock delivery.");
+    println!(
+        "Select the preferred run's eligible files with {} delivery.",
+        crate::workspace::invocation(&space.root)
+    );
     Ok(())
 }

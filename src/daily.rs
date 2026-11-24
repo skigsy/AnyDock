@@ -2,12 +2,11 @@ use crate::{
     engine::{self, Phase},
     input_scope, policy, recurring, review,
     storage::{LockedRun, copy_exact, fault, fingerprint, hash, lock_file, sync_dir},
-    workspace::{PROGRESS, Plan, Workspace, file, names, optional, slug},
+    workspace::{PROGRESS, Plan, Workspace, file, names, optional, os_metadata, slug},
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
@@ -180,7 +179,7 @@ struct Sections {
     blockers: String,
 }
 
-pub fn write(space: &Workspace, feeds: &[String]) -> Result<()> {
+pub fn write(space: &Workspace, feeds: &[String], add: &[String], remove: &[String]) -> Result<()> {
     let request = (!feeds.is_empty())
         .then(|| Config::from_feeds(feeds))
         .transpose()?;
@@ -196,11 +195,13 @@ pub fn write(space: &Workspace, feeds: &[String]) -> Result<()> {
         ensure!(config_path.try_exists()?, "{}", needs_setup());
     }
     let _lock = lock_file(&file(&space.root, ".anydock/daily.lock")?, "daily brief")?;
-    let saved: Option<Config> = optional(fs::read(&config_path))?
-        .map(|bytes| serde_json::from_slice(&bytes).with_context(|| format!("read {CONFIG}")))
+    let prior_config = optional(fs::read(&config_path))?;
+    let saved: Option<Config> = prior_config
+        .as_deref()
+        .map(|bytes| serde_json::from_slice(bytes).with_context(|| format!("read {CONFIG}")))
         .transpose()?;
-    let publish = saved.is_none();
-    let config = if let Some(saved) = saved {
+    let initial = saved.is_none();
+    let mut config = if let Some(saved) = saved {
         ensure!(
             request.as_ref().is_none_or(|request| *request == saved),
             "daily feed configuration already exists at {CONFIG}. Edit that file to change the feeds"
@@ -209,12 +210,32 @@ pub fn write(space: &Workspace, feeds: &[String]) -> Result<()> {
     } else {
         request.with_context(needs_setup)?
     };
+    let mut publish = initial;
+    for name in remove {
+        slug(name)?;
+        let before = config.feeds.len();
+        config.feeds.retain(|feed| feed.name != *name);
+        publish |= before != config.feeds.len();
+    }
+    for entry in Config::from_feeds(add)?.feeds {
+        if let Some(existing) = config.feeds.iter().find(|feed| feed.name == entry.name) {
+            ensure!(
+                *existing == entry,
+                "feed {} already exists with different settings",
+                entry.name
+            );
+        } else {
+            config.feeds.push(entry);
+            publish = true;
+        }
+    }
     config.validate()?;
     let report = file(&space.root, REPORT)?;
     let prior = optional(fs::read_to_string(&report))?;
+    let previous_layout = crate::workspace::previous_layout(&space.root)?;
     let mut old = prior
         .as_deref()
-        .map(read_receipt)
+        .map(|text| read_receipt(text, previous_layout.as_deref()))
         .transpose()?
         .unwrap_or_default();
     if publish {
@@ -222,7 +243,15 @@ pub fn write(space: &Workspace, feeds: &[String]) -> Result<()> {
         serde_json::to_writer_pretty(&mut staged, &config)?;
         writeln!(staged)?;
         staged.as_file().sync_all()?;
-        staged.persist_noclobber(&config_path)?;
+        if initial {
+            staged.persist_noclobber(&config_path)?;
+        } else {
+            ensure!(
+                optional(fs::read(&config_path))? == prior_config,
+                "{CONFIG} changed during setup; retry with the new settings"
+            );
+            crate::storage::persist_replace(staged, &config_path)?;
+        }
         sync_dir(parent)?;
         fault("after-daily-config");
     }
@@ -289,7 +318,7 @@ pub fn write(space: &Workspace, feeds: &[String]) -> Result<()> {
         "{REPORT} changed during generation; keep your edits and regenerate when ready"
     );
     if prior.is_some() {
-        staged.persist(&report)?;
+        crate::storage::persist_replace(staged, &report)?;
     } else {
         staged.persist_noclobber(&report)?;
     }
@@ -298,18 +327,25 @@ pub fn write(space: &Workspace, feeds: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn read_receipt(text: &str) -> Result<Receipt> {
+fn read_receipt(text: &str, previous_layout: Option<&str>) -> Result<Receipt> {
     let protected = || {
         format!(
             "{REPORT} contains edits or is user-owned; move it to keep your notes before regenerating"
         )
     };
     let (header, body) = text.split_once('\n').with_context(protected)?;
+    let header = header.strip_suffix('\r').unwrap_or(header);
     let digest = header
         .strip_prefix(HEADER)
+        .or_else(|| header.strip_prefix(&format!("<!-- {}-daily-v1 ", previous_layout?)))
         .and_then(|s| s.strip_suffix(COMMENT_END))
         .with_context(protected)?;
-    ensure!(digest == hash(body.as_bytes()), "{}", protected());
+    ensure!(
+        digest == hash(body.as_bytes())
+            || (body.contains("\r\n") && digest == hash(body.replace("\r\n", "\n").as_bytes())),
+        "{}",
+        protected()
+    );
     let metadata = body
         .lines()
         .next()
@@ -347,7 +383,8 @@ fn validate_path(path: &str) -> Result<()> {
 
 fn source_file(root: &Path, path: &str) -> Result<Option<PathBuf>> {
     validate_path(path)?;
-    let file = root.join(path);
+    let mut file = root.to_owned();
+    file.extend(path.split('/'));
     let Some(resolved) =
         optional(file.canonicalize()).with_context(|| format!("open {}", file.display()))?
     else {
@@ -403,6 +440,7 @@ fn scan_feed(
                             .map_err(|_| anyhow::anyhow!("source filename is not valid text"))?;
                         if feed.failure_file.as_ref() != Some(&name)
                             && entry.path() != space.root.join(REPORT)
+                            && !os_metadata(&name)
                         {
                             files.push(name);
                         }
@@ -533,7 +571,7 @@ fn selected_values(
 ) -> Result<()> {
     let snapshot = snapshot_path(&feed.name, path, &record.digest);
     let bytes = snapshot_bytes(space, &snapshot, &record.digest)?;
-    let current: &RawValue = serde_json::from_slice(&bytes).context("invalid source JSON")?;
+    let current = input_scope::parse(&bytes).context("invalid source JSON")?;
     let mut earlier = None;
     if let Some(digest) = &record.previous_digest
         && digest != &record.digest
@@ -555,19 +593,18 @@ fn selected_values(
             )),
         }
     }
-    let previous =
-        earlier
-            .as_deref()
-            .and_then(|bytes| match serde_json::from_slice::<&RawValue>(bytes) {
-                Ok(document) => Some(document),
-                Err(_) => {
-                    issues.push(format!(
-                        "Earlier snapshot for {} contains invalid JSON",
-                        inline(path)
-                    ));
-                    None
-                }
-            });
+    let previous = earlier
+        .as_deref()
+        .and_then(|bytes| match input_scope::parse(bytes) {
+            Ok(document) => Some(document),
+            Err(_) => {
+                issues.push(format!(
+                    "Earlier snapshot for {} contains invalid JSON",
+                    inline(path)
+                ));
+                None
+            }
+        });
     writeln!(output)?;
     for pointer in &feed.fields[path] {
         match input_scope::select(current, pointer) {
@@ -703,12 +740,7 @@ fn preview(space: &Workspace, path: &str, output: &mut String) -> Result<()> {
 }
 
 fn inspect_runs(space: &Workspace, cutoff: DateTime<Local>, sections: &mut Sections) -> Result<()> {
-    let cli =
-        if cfg!(windows) && file(&space.root, "bin/anydock.exe").is_ok_and(|bin| bin.is_file()) {
-            r".\bin\anydock.exe"
-        } else {
-            "anydock"
-        };
+    let cli = crate::workspace::invocation(&space.root);
     let mut current_runs = BTreeSet::new();
     let mut superseded = BTreeSet::new();
     let mut incoming: BTreeMap<String, Vec<_>> = BTreeMap::new();
@@ -759,7 +791,7 @@ fn inspect_runs(space: &Workspace, cutoff: DateTime<Local>, sections: &mut Secti
     }
     for run in names(&space.root, "runs")? {
         let active = !superseded.contains(&run) || current_runs.contains(&run);
-        let finished = match inspect_run(space, &run, active, cutoff, cli, sections) {
+        let finished = match inspect_run(space, &run, active, cutoff, &cli, sections) {
             Ok(finished) => finished,
             Err(error) => {
                 writeln!(
@@ -851,7 +883,14 @@ fn inspect_run(
     let recent =
         DateTime::<Utc>::from(fs::metadata(file(&root, ".anydock/state.json")?)?.modified()?)
             >= cutoff;
-    if !recent && !active {
+    if !recent
+        && !active
+        && !state.stages.values().any(|entry| {
+            entry
+                .finalized_at
+                .is_some_and(|at| at >= cutoff.timestamp())
+        })
+    {
         return Ok(false);
     }
     let plan = Plan::load(&root)?;
@@ -868,11 +907,28 @@ fn inspect_run(
         return Ok(false);
     }
     let view = engine::evaluate(&root, &plan, &mut state, false)?;
-    if recent {
-        for item in view.stages.iter().filter(|item| item.phase == Phase::Done) {
+    for item in view.stages.iter().filter(|item| item.phase == Phase::Done) {
+        let recorded = state.stages[&item.stage.id].finalized_at;
+        let reused = state.update.as_ref().is_some_and(|update| {
+            update
+                .reused
+                .get(&item.stage.id)
+                .is_some_and(|entry| item.revision.as_ref() == Some(&entry.revision))
+        });
+        if !reused && recorded.map_or(recent, |at| at >= cutoff.timestamp()) {
+            let when = recorded
+                .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
+                .map_or_else(
+                    || "completion time unavailable".into(),
+                    |time| {
+                        time.with_timezone(&Local)
+                            .format("%Y-%m-%d %H:%M %:z")
+                            .to_string()
+                    },
+                );
             writeln!(
                 sections.completed,
-                "- {brief} · {}{}",
+                "- {brief} · {} · {when}{}",
                 code(&item.stage.id),
                 output_links(run, &item.stage.fields.outputs)
             )?;

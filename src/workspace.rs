@@ -7,35 +7,62 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
 pub const BRIEF: &str = "brief.md";
 pub const PROGRESS: &str = "progress.md";
+pub const VERSION_FILE: &str = "anydock.version";
+const LOCAL_FOLDERS: [&str; 5] = ["runs", "workflows", "inbox", "bundles", "briefs"];
 
 pub struct Workspace {
     pub root: PathBuf,
+    pub start: PathBuf,
 }
 
 pub struct Stage {
     pub id: String,
     pub contract: Vec<u8>,
     pub fields: Fields,
+    pub format: Option<String>,
 }
 
 impl Stage {
     pub fn read(id: String, contract: Vec<u8>) -> Result<Self> {
-        let fields = parse_fields(&contract).with_context(|| format!("parse stage {id}"))?;
+        Self::read_as(id, contract, None)
+    }
+
+    fn read_as(id: String, contract: Vec<u8>, format: Option<String>) -> Result<Self> {
+        if let Some(format) = &format {
+            let markdown = std::str::from_utf8(&contract)?;
+            let first = markdown
+                .trim_start_matches('\u{feff}')
+                .lines()
+                .find_map(|line| {
+                    line.trim_end()
+                        .strip_prefix("\x60\x60\x60")
+                        .filter(|label| !label.is_empty())
+                });
+            ensure!(
+                first == Some(format),
+                "the previous contract format must match its first code fence"
+            );
+        }
+        let fields = parse_fields(&contract, format.as_deref().unwrap_or("anydock"))
+            .with_context(|| format!("parse stage {id}"))?;
         Ok(Self {
             id,
             contract,
             fields,
+            format,
         })
     }
 
     pub fn attach_reference(&mut self, path: &str) -> Result<()> {
-        let (head, body, tail) = contract_parts(std::str::from_utf8(&self.contract)?)?;
+        let format = self.format.as_deref().unwrap_or("anydock");
+        let (head, body, tail) = contract_parts(std::str::from_utf8(&self.contract)?, format)?;
         let mut fields: serde_json::Value = serde_json::from_str(body)?;
         let map = fields.as_object_mut().context("expected stage fields")?;
         map.entry("references")
@@ -44,7 +71,7 @@ impl Stage {
             .context("expected stage references")?
             .push(serde_json::json!({"path": path}));
         let contract = format!("{head}{}\n{tail}", serde_json::to_string_pretty(&fields)?);
-        self.fields = parse_fields(contract.as_bytes())?;
+        self.fields = parse_fields(contract.as_bytes(), format)?;
         self.contract = contract.into_bytes();
         Ok(())
     }
@@ -52,6 +79,33 @@ impl Stage {
     pub fn contract_path(&self) -> String {
         format!("stages/{}/stage.md", self.id)
     }
+
+    pub fn format_path(&self) -> String {
+        format!("stages/{}/contract-format", self.id)
+    }
+
+    pub fn format_bytes(&self) -> Option<Vec<u8>> {
+        self.format
+            .as_ref()
+            .map(|format| format!("{format}\n").into_bytes())
+    }
+
+    pub fn definition_hashes(&self) -> impl Iterator<Item = (String, String)> {
+        std::iter::once((self.contract_path(), crate::storage::hash(&self.contract))).chain(
+            self.format_bytes()
+                .map(|bytes| (self.format_path(), crate::storage::hash(&bytes))),
+        )
+    }
+}
+
+pub fn previous_layout(root: &Path) -> Result<Option<String>> {
+    optional(fs::read_to_string(file(root, ".anydock/previous-layout")?))?
+        .map(|saved| {
+            let name = saved.trim();
+            slug(name)?;
+            Ok(name.to_owned())
+        })
+        .transpose()
 }
 
 #[derive(Deserialize)]
@@ -60,6 +114,8 @@ pub struct Fields {
     pub inputs: Vec<String>,
     #[serde(default)]
     pub input_fields: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub input_value_format: Option<input_scope::Format>,
     pub outputs: Vec<String>,
     #[serde(default)]
     pub references: Vec<Reference>,
@@ -76,12 +132,90 @@ pub struct Plan {
 }
 
 impl Workspace {
-    pub fn open() -> Result<Self> {
-        let root = std::env::current_dir()?.canonicalize()?;
-        let version = fs::read_to_string(file(&root, "anydock.version")?)
-            .context("open AnyDock at its workspace root (anydock.version is required)")?;
-        ensure!(version.trim() == "1", "unsupported workspace version");
-        Ok(Self { root })
+    pub fn open(start: &Path) -> Result<Self> {
+        let start = start.canonicalize()?;
+        ensure!(start.is_dir(), "expected a workspace directory");
+        for root in start.ancestors() {
+            if has_marker(root)? {
+                return Ok(Self {
+                    root: root.into(),
+                    start,
+                });
+            }
+        }
+        bail!("no AnyDock workspace found. Open a checkout or use anydock init")
+    }
+
+    pub fn init(start: &Path) -> Result<()> {
+        let root = start.canonicalize()?;
+        ensure!(root.is_dir(), "expected a workspace directory");
+        if has_marker(&root)? {
+            println!("AnyDock is already initialized here.");
+            return Ok(());
+        }
+        let scratch = std::env::temp_dir().canonicalize()?;
+        let locks = directory(&scratch, "anydock-init-locks")?;
+        fs::create_dir_all(&locks)?;
+        let key = crate::storage::hash(root.as_os_str().as_encoded_bytes());
+        let _lock = crate::storage::lock_file(&file(&locks, &key)?, "workspace initialization")?;
+        if has_marker(&root)? {
+            println!("AnyDock is already initialized here.");
+            return Ok(());
+        }
+        for name in LOCAL_FOLDERS {
+            ensure!(
+                optional(fs::symlink_metadata(root.join(name)))?.is_none(),
+                "{name}/ is reserved for AnyDock. Choose an empty subfolder and run anydock -C <folder> init there"
+            );
+        }
+        let instructions = file(&root, "AGENTS.md")?;
+        let ignore = file(&root, ".gitignore")?;
+        let meta = directory(&root, ".anydock")?;
+        let lock = file(&root, ".anydock/init.lock")?;
+        if let Some(mut entries) = optional(fs::read_dir(&meta))? {
+            ensure!(
+                entries.all(|entry| entry.is_ok_and(|entry| entry.path() == lock)),
+                "existing .anydock data requires its workspace marker or a verified upgrade"
+            );
+        }
+        let before = optional(fs::read(&ignore))?;
+        let after = ignore_contents(before.as_deref());
+        let mut installed_ignore = false;
+        let mut installed_instructions = false;
+        let instructions_bytes = include_bytes!("../AGENTS.md");
+        let initialized = (|| {
+            installed_ignore = replace_ignore(&ignore, before.as_deref(), &after)?;
+            if !instructions.try_exists()? {
+                write_new(&instructions, instructions_bytes)?;
+                installed_instructions = true;
+            }
+            crate::storage::fault("before-init-marker");
+            write_new(&root.join(VERSION_FILE), b"1\n")
+        })();
+        if let Err(error) = initialized {
+            let rollback = (|| {
+                if installed_instructions && fs::read(&instructions)? == instructions_bytes {
+                    fs::remove_file(&instructions)?;
+                }
+                if installed_ignore && fs::read(&ignore)? == after {
+                    if let Some(before) = before.as_deref() {
+                        replace_ignore(&ignore, Some(&after), before)?;
+                    } else {
+                        fs::remove_file(&ignore)?;
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
+            })();
+            return Err(error).with_context(|| match rollback {
+                Ok(()) => "workspace initialization failed".to_owned(),
+                Err(restore) => {
+                    format!("workspace initialization failed; restore setup files: {restore:#}")
+                }
+            });
+        }
+        crate::storage::sync_dir(&root)?;
+        println!("AnyDock initialized. The workspace is idle.");
+        Ok(())
     }
 
     pub fn run(&self, id: &str) -> Result<PathBuf> {
@@ -93,21 +227,178 @@ impl Workspace {
     }
 }
 
+pub fn invocation(root: &Path) -> String {
+    let current = std::env::current_dir()
+        .and_then(|path| path.canonicalize())
+        .ok();
+    let relative = current
+        .as_deref()
+        .and_then(|current| current.strip_prefix(root).ok());
+    let executable = if cfg!(windows) {
+        "anydock.exe"
+    } else {
+        "anydock"
+    };
+    let packaged = root.join("bin").join(executable);
+    let mut command = if packaged.is_file() {
+        if let Some(relative) = relative {
+            let separator = std::path::MAIN_SEPARATOR;
+            let base = if relative.as_os_str().is_empty() {
+                ".".into()
+            } else {
+                vec![".."; relative.components().count()].join(&separator.to_string())
+            };
+            format!("{base}{separator}bin{separator}{executable}")
+        } else {
+            let absolute = shell_word(&display_native(&packaged));
+            if cfg!(windows) {
+                format!("& {absolute}")
+            } else {
+                absolute
+            }
+        }
+    } else {
+        "anydock".into()
+    };
+    if relative.is_none() {
+        command.push_str(" -C ");
+        command.push_str(&shell_word(&display_native(root)));
+    }
+    command
+}
+
+pub fn run_invocation(run: &Path) -> String {
+    run.parent()
+        .and_then(Path::parent)
+        .map_or_else(|| "anydock".into(), invocation)
+}
+
+pub fn shell_word(text: &str) -> String {
+    if text
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || "-_.:/\\".contains(ch))
+    {
+        text.into()
+    } else if cfg!(windows) {
+        format!("'{}'", text.replace('\'', "''"))
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
+fn display_native(path: &Path) -> String {
+    let display = path.to_string_lossy();
+    if let Some(tail) = display.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{tail}")
+    } else {
+        display.strip_prefix(r"\\?\").unwrap_or(&display).to_owned()
+    }
+}
+
+pub fn append_ignore(path: &Path) -> Result<()> {
+    let previous = optional(fs::read(path))?;
+    replace_ignore(
+        path,
+        previous.as_deref(),
+        &ignore_contents(previous.as_deref()),
+    )?;
+    Ok(())
+}
+
+fn ignore_contents(previous: Option<&[u8]>) -> Vec<u8> {
+    let mut updated = previous.unwrap_or_default().to_vec();
+    let block: String = LOCAL_FOLDERS
+        .into_iter()
+        .chain([".anydock"])
+        .map(|folder| format!("/{folder}/\n"))
+        .collect();
+    if !updated.ends_with(block.as_bytes()) {
+        if !updated.is_empty() && !updated.ends_with(b"\n") {
+            updated.push(b'\n');
+        }
+        updated.extend_from_slice(block.as_bytes());
+    }
+    updated
+}
+
+fn replace_ignore(path: &Path, previous: Option<&[u8]>, updated: &[u8]) -> Result<bool> {
+    if let Some(previous) = previous {
+        if updated == previous {
+            return Ok(false);
+        }
+        let mut pending =
+            tempfile::NamedTempFile::new_in(path.parent().context("missing parent")?)?;
+        pending.write_all(updated)?;
+        pending.as_file().sync_all()?;
+        ensure!(
+            fs::read(path)? == previous,
+            ".gitignore changed during setup. Retry initialization"
+        );
+        crate::storage::persist_replace(pending, path)?;
+    } else {
+        write_new(path, updated)?;
+    }
+    Ok(true)
+}
+
+pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut pending = tempfile::NamedTempFile::new_in(path.parent().context("missing parent")?)?;
+    pending.write_all(bytes)?;
+    pending.as_file().sync_all()?;
+    pending.persist_noclobber(path)?;
+    Ok(())
+}
+
+pub fn has_marker(root: &Path) -> Result<bool> {
+    let Some(version) = optional(fs::read_to_string(file(root, VERSION_FILE)?))? else {
+        return Ok(false);
+    };
+    ensure!(version.trim() == "1", "unsupported workspace version");
+    Ok(true)
+}
+
 pub fn segment(name: &str) -> Result<()> {
     let base = name.split('.').next().unwrap_or_default();
-    let reserved = matches!(base, "con" | "prn" | "aux" | "nul")
-        || (base.len() == 4
-            && (base.starts_with("com") || base.starts_with("lpt"))
-            && base.as_bytes()[3].is_ascii_digit());
     ensure!(
         !name.is_empty()
             && name.len() <= 128
             && !name.ends_with('.')
             && !name.starts_with('.')
-            && !reserved
+            && !reserved_device(base)
             && name
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b)),
+        "invalid portable path component {name:?}"
+    );
+    Ok(())
+}
+
+fn reserved_device(base: &str) -> bool {
+    let base = base.trim_end_matches(' ').to_ascii_lowercase();
+    matches!(
+        base.as_str(),
+        "con" | "prn" | "aux" | "nul" | "conin$" | "conout$"
+    ) || base
+        .strip_prefix("com")
+        .or_else(|| base.strip_prefix("lpt"))
+        .is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+}
+
+pub fn input_component(name: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty()
+            && name.encode_utf16().count() <= 255
+            && !name.ends_with(['.', ' '])
+            && !name.starts_with('.')
+            && !name
+                .chars()
+                .any(|value| value.is_control() || "<>:\"/\\|?*".contains(value))
+            && !reserved_device(name.split('.').next().unwrap_or_default()),
         "invalid portable path component {name:?}"
     );
     Ok(())
@@ -142,15 +433,26 @@ pub fn names(root: &Path, collection: &str) -> Result<Vec<String>> {
     let path = directory(root, collection)?;
     if let Some(entries) = optional(fs::read_dir(path))? {
         for entry in entries {
-            let name = entry?
+            let entry = entry?;
+            let name = entry
                 .file_name()
                 .into_string()
                 .unwrap_or_else(|name| name.to_string_lossy().into_owned());
+            if os_metadata(&name) && entry.file_type()?.is_file() {
+                continue;
+            }
             result.push(name);
         }
     }
     result.sort_unstable();
     Ok(result)
+}
+
+pub fn os_metadata(name: &str) -> bool {
+    name.eq_ignore_ascii_case(".DS_Store")
+        || name.eq_ignore_ascii_case("desktop.ini")
+        || name.eq_ignore_ascii_case("Thumbs.db")
+        || name.starts_with("._")
 }
 
 pub fn optional<T>(result: io::Result<T>) -> io::Result<Option<T>> {
@@ -168,8 +470,8 @@ fn checked(root: &Path, relative: &str, is_dir: bool) -> Result<PathBuf> {
     let mut parts = components.peekable();
     while let Some(part) = parts.next() {
         // This function also resolves fixed internal dot directories.
-        if part != ".anydock" {
-            segment(part)?;
+        if !matches!(part, ".anydock" | ".gitignore" | "AGENTS.md") {
+            input_component(part)?;
         }
         path.push(part);
         let Some(metadata) = optional(fs::symlink_metadata(&path))
@@ -245,8 +547,8 @@ pub fn render_contract(title: &str, work: &str, fields: &serde_json::Value) -> R
     ))
 }
 
-fn contract_parts(markdown: &str) -> Result<(&str, &str, &str)> {
-    const OPEN: &str = "\x60\x60\x60anydock";
+fn contract_parts<'a>(markdown: &'a str, format: &str) -> Result<(&'a str, &'a str, &'a str)> {
+    let open = format!("\x60\x60\x60{format}");
     const CLOSE: &str = "\x60\x60\x60";
     let mut offset = 0;
     let mut body_start = None;
@@ -260,23 +562,23 @@ fn contract_parts(markdown: &str) -> Result<(&str, &str, &str)> {
                     &markdown[offset..],
                 ));
             }
-        } else if text == OPEN || (offset == 0 && text.trim_start_matches('\u{feff}') == OPEN) {
+        } else if text == open || (offset == 0 && text.trim_start_matches('\u{feff}') == open) {
             body_start = Some(offset + line.len());
         }
         offset += line.len();
     }
     if body_start.is_some() {
-        bail!("unclosed anydock fence");
+        bail!("unclosed {format} fence");
     }
-    bail!("missing anydock fence")
+    bail!("missing {format} fence")
 }
 
-fn parse_fields(contract: &[u8]) -> Result<Fields> {
-    let (_, body, tail) = contract_parts(std::str::from_utf8(contract)?)?;
+fn parse_fields(contract: &[u8], format: &str) -> Result<Fields> {
+    let (_, body, tail) = contract_parts(std::str::from_utf8(contract)?, format)?;
     let prose: Vec<_> = tail.lines().skip(1).map(str::trim_end).collect();
     ensure!(
-        !prose.contains(&"\x60\x60\x60anydock"),
-        "multiple anydock fences"
+        !prose.contains(&format!("\x60\x60\x60{format}").as_str()),
+        "multiple {format} fences"
     );
     ensure!(
         prose
@@ -298,10 +600,14 @@ pub fn load_stages(folder: &Path) -> Result<Vec<Stage>> {
     let mut stages = Vec::new();
     let mut numbers = BTreeSet::new();
     for entry in fs::read_dir(&dir).with_context(|| format!("open {}", dir.display()))? {
-        let id = entry?
+        let entry = entry?;
+        let id = entry
             .file_name()
             .into_string()
             .map_err(|_| anyhow::anyhow!("non-UTF-8 stage name"))?;
+        if os_metadata(&id) && entry.file_type()?.is_file() {
+            continue;
+        }
         segment(&id)?;
         let number = stage_number(&id).with_context(|| format!("invalid stage {id}"))?;
         ensure!(
@@ -311,12 +617,22 @@ pub fn load_stages(folder: &Path) -> Result<Vec<Stage>> {
         let name = format!("stages/{id}/stage.md");
         let contract = fs::read(file(folder, &name)?)
             .with_context(|| format!("read {name} in {}", folder.display()))?;
-        let fields = parse_fields(&contract).with_context(|| format!("parse {name}"))?;
-        stages.push(Stage {
-            id,
-            contract,
-            fields,
-        });
+        let format = optional(fs::read_to_string(file(
+            folder,
+            &format!("stages/{id}/contract-format"),
+        )?))?;
+        let format = format
+            .map(|format| {
+                let name = format.trim_end_matches('\n');
+                slug(name)?;
+                ensure!(
+                    format == format!("{name}\n"),
+                    "invalid contract format receipt"
+                );
+                Ok::<_, anyhow::Error>(name.to_owned())
+            })
+            .transpose()?;
+        stages.push(Stage::read_as(id, contract, format).with_context(|| format!("parse {name}"))?);
     }
     stages.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     ensure!(!stages.is_empty(), "{} has no stages", folder.display());
@@ -366,6 +682,7 @@ impl Plan {
 pub fn validate_stages(root: &Path, stages: &[Stage]) -> Result<BTreeMap<String, String>> {
     let mut producers = BTreeMap::new();
     let mut paths = BTreeSet::new();
+    let mut spellings = BTreeMap::new();
     for stage in stages {
         let prefix = format!("stages/{}/outputs/", stage.id);
         ensure!(
@@ -420,11 +737,20 @@ pub fn validate_stages(root: &Path, stages: &[Stage]) -> Result<BTreeMap<String,
         }
     }
     for path in &paths {
-        for (idx, _) in path.match_indices('/') {
+        for prefix in path
+            .match_indices('/')
+            .map(|(idx, _)| &path[..idx])
+            .chain([*path])
+        {
+            if let Some(other) = spellings.insert(prefix.to_lowercase(), prefix) {
+                ensure!(
+                    other == prefix,
+                    "conflicting path spellings: {other} and {prefix}"
+                );
+            }
             ensure!(
-                !paths.contains(&path[..idx]),
-                "conflicting file paths: {} and {path}",
-                &path[..idx]
+                prefix == *path || !paths.contains(prefix),
+                "conflicting file paths: {prefix} and {path}"
             );
         }
     }
@@ -432,11 +758,16 @@ pub fn validate_stages(root: &Path, stages: &[Stage]) -> Result<BTreeMap<String,
 }
 
 pub fn validate_ref(path: &str) -> Result<()> {
-    if path.rsplit_once('/').is_none() {
-        bail!("expected a run-relative file path, got {path:?}");
-    }
-    for part in path.split('/') {
-        segment(part)?;
+    let (scope, components) = path
+        .split_once('/')
+        .with_context(|| format!("expected a run-relative file path, got {path:?}"))?;
+    segment(scope)?;
+    for part in components.split('/') {
+        if matches!(scope, "inputs" | "inbox") {
+            input_component(part)?;
+        } else {
+            segment(part)?;
+        }
     }
     Ok(())
 }

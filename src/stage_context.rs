@@ -8,7 +8,14 @@ use std::{fs::File, io::Read, path::Path};
 const PER_FILE: usize = 4096;
 const TOTAL: usize = 12_288;
 
-pub fn show(run: &Path, id: &str, plan: &Plan, stage: &Stage) -> Result<()> {
+pub fn show(
+    run: &Path,
+    id: &str,
+    plan: &Plan,
+    stage: &Stage,
+    format: input_scope::Format,
+) -> Result<()> {
+    let command = crate::workspace::run_invocation(run);
     let mut available = TOTAL;
     let mut show = |label: &str, bytes: &[u8]| {
         println!("\n--- {label} ---");
@@ -42,13 +49,14 @@ pub fn show(run: &Path, id: &str, plan: &Plan, stage: &Stage) -> Result<()> {
     show(&stage.contract_path(), &stage.contract);
     for name in &stage.fields.inputs {
         if let Some(pointers) = stage.fields.input_fields.get(name) {
-            let data = input_scope::read(run, name, pointers)?
+            let data = input_scope::read(run, name, pointers, format)?
                 .with_context(|| format!("missing input {name}"))?;
             let label = format!("Selected JSON values in {name}");
             show(&label, &data);
             println!(
-                "Full selected values: anydock input {id} {} {name}",
-                stage.id
+                "Full selected values: {command} input {id} {} {}",
+                stage.id,
+                crate::workspace::shell_word(name)
             );
             continue;
         }
