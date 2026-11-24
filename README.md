@@ -1,66 +1,90 @@
 # AnyDock
 
-![AnyDock. Start with one prompt. Keep your work when you change agents.](docs/assets/anydock-banner.svg)
+![AnyDock, a local AI workspace. Start with one prompt and keep your work when you change agents.](docs/assets/anydock-banner.svg)
 
-**Your agent can change. Your work stays with you.**
+**Close the chat. Keep the work.**
 
-AnyDock is a local AI workspace for the work you already do. Open a folder, give your agent a real task, and put its brief, inputs, editable drafts, and decisions on disk. Tomorrow, a fresh session can see what finished, what changed, and exactly where to pick up.
+AnyDock is a local AI workspace you set up with one prompt. Switch models or harnesses, open the same folder, and pick up the exact draft and decision waiting for you. Save an approved correction and carry it into the next run.
 
-**One prompt to set up. Model- and harness-independent by design.** Start with a single task, then keep useful workflows as editable files. The same folder can grow with your work and still open with whatever agent you choose next.
+[**Get AnyDock**](#get-anydock) · [One-prompt setup](#one-prompt-setup) · [CLI guide](USAGE.md)
 
-[**Releases**](https://github.com/skigsy/AnyDock/releases) · [**One-prompt install**](#one-prompt-install) · [Worked example](docs/example.md) · [CLI guide](USAGE.md)
+## Pick up in a fresh session
 
-## One-prompt install
+![Two terminal excerpts from the budget example. The first session stops at review. A fresh session finds summary.md, the same pending question, and the same revision.](docs/assets/workspace-handoff.svg)
 
-Paste this into an agent that can read and write local files and run shell commands. Fill in the bracketed lines.
+Tell the new session, **“Resume the budget review in this folder.”** It finds `summary.md`, the exact revision, and the decision still waiting for you. **Are these budget figures correct?** [Run the worked example](docs/example.md).
+
+## Persistent memory you can edit
+
+- **Pick up the work.** The brief, source snapshots, drafts, and decisions stay in the workspace. A fresh session can see what finished, what changed, and what's waiting.
+- **Keep the correction.** Suppose you ask for the approved total on the first line. Save the workflow and confirm that instruction as editable Markdown. The next budget run brings it along.
+- **Keep work you've already reviewed.** When a recurring input changes, the managed workflow can carry forward the unchanged results and their approvals. Review the work affected by the change.
+
+## One-prompt setup
+
+Open AnyDock in your agent and start with one file you already have.
+
+```text
+Use AnyDock to [your task] with [your file].
+Start now, write an editable draft, and stop for my review.
+```
+
+<details>
+<summary>Bring in an existing project, documents, skills, or agent definitions</summary>
 
 ```text
 Set up AnyDock at [local folder] for [what I want to use it for].
-Bring in [the documents, projects, skills or agent definitions I name, with
-their current paths, or say "none yet"].
+Bring in [documents, projects, skills or agent definitions and their paths].
 
-Use the extracted AnyDock 0.2.0 folder I already opened or a 0.2.0 package
-I provide. Verify a package against its SHA-256 checksum before extracting it.
-If I asked to use an existing project, use the packaged binary with
-`-C "<project folder>" init`. Leave any existing project instructions intact.
+Use the AnyDock folder I opened or the package I provide. Verify a release
+archive against its SHA-256 checksum before extracting it.
+For an existing project, run the packaged CLI with -C "<project folder>" init.
+Read AGENTS.md and preserve any existing project instructions.
 
-Read AGENTS.md. Copy only the named material. Keep projects and their Git
-metadata together. Preserve originals unless I explicitly asked you to move
-them. Keep imported work out of AnyDock's Git history. Bring in skills and
-agent definitions as local files and enable only the ones I asked to use.
+Copy only the named material. Preserve originals unless I ask you to move
+them. Keep projects and their Git metadata together. Keep imported work out
+of AnyDock's Git history. Activate only the skills or agents I name.
 
-Set up only the features I asked for. Leave the daily brief disabled unless
-I explicitly ask for it. Leave the workspace idle until I give you work to
-execute. If the AnyDock CLI is available, run its check command from the
-workspace root. Show me where everything went, which mode is active, and what
-to tell a fresh agent when I want to continue.
+Set up the features I asked for. Leave the workspace idle and the daily
+brief disabled unless I ask for it. Run check from the workspace root if
+the CLI is available. Tell me where everything went, which mode is active,
+and what to say in a fresh session to continue.
 ```
 
-## Why it carries forward
+</details>
 
-[![The local workspace carries the run brief, stage contracts, editable outputs, and exact review state.](docs/assets/workspace-handoff.svg)](docs/assets/workspace-handoff.svg)
+The optional daily brief can collect local feeds, recent work, and pending decisions in one Markdown file. [Configure the daily brief](USAGE.md#daily-brief).
 
-- **Start Monday's work on Tuesday.** Open the same folder in a fresh session and ask the agent to resume. The managed handoff identifies the current files, the next action, and any decision that stands in its way.
-- **Change the model or harness without migrating the run.** The new agent needs access to your workspace files and a terminal for managed work. Read `AGENTS.md` and use `anydock handoff <run>`. The brief, stage contracts, attempts, and approvals stay in the folder. Your login, tools, and permissions remain with your chosen harness.
-- **Keep the parts that work.** Save your stage definitions and approved corrections for later jobs. When a recurring input changes, managed runs can carry forward untouched work and its approvals. You review the work the change actually affects.
-- **Keep approval attached to the file you saw.** The CLI binds approval to an exact revision. Edit the draft in any editor and AnyDock asks for a new approval before affected work continues.
+## Why Rust?
 
-A fresh workspace starts empty. The built-in instructions work on their own. Add the Rust CLI for exact review gates, input tracking, archived revisions, and recoverable transitions. The morning Markdown brief is optional. If you enable it, it brings your local feeds, recent work, and pending decisions into one file.
+**Editable memory. Exact approvals. One local Rust binary.**
 
-## Download or build
+Your agent does the work. The Rust CLI owns the run transitions, so the same rules apply when the agent changes.
 
-Use the 0.2.0 archive for your platform from the [release page](https://github.com/skigsy/AnyDock/releases) when available, or an archive you already have. Each archive extracts to `AnyDock-0.2.0/`. Open that folder in your agent.
+- **Approval follows the revision.** Edit a reviewed draft and AnyDock requires a decision on the new revision. The earlier output stays in history.
+- **Run updates are serialized.** If two sessions advance the same run, the CLI takes a lock and checks state before each update.
+- **The next session can recover.** State is committed atomically, and confirmed outputs and decisions stay available on disk.
 
-| Platform | Archive | Check |
-| --- | --- | --- |
-| Windows x64 | `AnyDock-0.2.0-windows-x64.zip` | `.\bin\anydock.exe check` |
-| Linux x64 | `AnyDock-0.2.0-linux-x64.tar.gz` | `./bin/anydock check` |
-| macOS ARM64 | `AnyDock-0.2.0-macos-arm64.tar.gz` | `./bin/anydock check` |
+## Get AnyDock
 
-For a source checkout, open the root to start in agent-only mode. Build the CLI with `cargo build --locked --release` on Rust 1.89 or newer with your platform linker installed.
+[**Download the v0.2.0 source ZIP**](https://github.com/skigsy/AnyDock/archive/refs/tags/v0.2.0.zip) · [Release downloads](https://github.com/skigsy/AnyDock/releases)
 
-Use `run --source "<file>"` for authorized single-stage work with files you already have. It preserves ordinary filenames and snapshots the source before work starts. Use `handoff <run>` to resume and `review <run> --interactive` to read and decide in one terminal. `reject` preserves the draft and records what should change. Use `upgrade --check` before adopting a newer binary in an existing workspace. `mcp` gives a compatible agent read-only discovery by default.
+Extract the ZIP and open its root in an agent that can read and edit local files. It starts empty and idle. The source workspace runs in agent-only mode through [AGENTS.md](AGENTS.md). Use the Rust CLI for managed review gates and recovery.
 
-Inputs, artifacts, workflows, and state are ignored by Git by default. Your chosen agent handles model calls under its own settings. The AnyDock CLI reads and writes local files.
+Build locally with Rust 1.89 or newer and your platform linker.
 
-[CLI and workspace guide](USAGE.md) · [Workspace instructions](AGENTS.md)
+```sh
+cargo build --locked --release
+```
+
+Or use the platform executable in a release archive when available. The archive opens to a single versioned folder. Open that folder and run the check from its root.
+
+| Platform | Check |
+| --- | --- |
+| Windows x64 | `.\bin\anydock.exe check` |
+| Linux x64 | `./bin/anydock check` |
+| macOS ARM64 | `./bin/anydock check` |
+
+Inputs, outputs, workflows, and run state are ignored by Git by default. The AnyDock CLI reads and writes local files. Your agent handles model calls under its own settings.
+
+[CLI and workspace guide](USAGE.md) · [MIT license](LICENSE)

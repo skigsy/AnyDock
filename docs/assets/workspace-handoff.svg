@@ -1,36 +1,41 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 265" width="1200" height="265" role="img" aria-labelledby="title description">
-  <title id="title">What a fresh agent can pick up</title>
-  <desc id="description">The same local workspace keeps the brief, stage contracts, editable outputs and exact review state between agent sessions.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 388" width="1120" height="388" role="img" aria-labelledby="title description">
+  <title id="title">Resume the same AnyDock review in a fresh session</title>
+  <desc id="description">Two excerpts from the budget note run. Review presents a 440 dollar budget summary. Handoff recovers summary.md, the same pending decision, and the same revision.</desc>
   <defs>
-    <linearGradient id="background" x2="1" y2="1"><stop stop-color="#1c1a1e"/><stop offset="1" stop-color="#101115"/></linearGradient>
-    <linearGradient id="line"><stop stop-color="#c77564"/><stop offset="1" stop-color="#f7c687"/></linearGradient>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#241d24"/>
+      <stop offset="1" stop-color="#101115"/>
+    </linearGradient>
+    <linearGradient id="accent">
+      <stop stop-color="#bd7161"/>
+      <stop offset="1" stop-color="#f4c387"/>
+    </linearGradient>
   </defs>
-  <rect x="1" y="1" width="1198" height="263" rx="23" fill="url(#background)" stroke="#383238" stroke-width="2"/>
-  <text x="49" y="59" fill="#f8eee4" font-family="Georgia,'Times New Roman',serif" font-size="38">What a fresh agent picks up</text>
-  <path d="M85 126h1016" stroke="url(#line)" stroke-width="2.5"/>
-  <g fill="#241f24" stroke="#edb778" stroke-width="2">
-    <rect x="63" y="104" width="44" height="44" rx="8"/>
-    <rect x="353" y="104" width="44" height="44" rx="8"/>
-    <rect x="643" y="104" width="44" height="44" rx="8"/>
-    <rect x="933" y="104" width="44" height="44" rx="8"/>
-    <path d="m1100 120 7 6-7 6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="1" y="1" width="1118" height="386" rx="24" fill="url(#background)" stroke="#42343b" stroke-width="2"/>
+  <path d="M34 29h1052" stroke="url(#accent)" stroke-width="2"/>
+  <g font-family="Georgia,'Times New Roman',serif" font-size="33" fill="#f9efe5">
+    <text x="34" y="80">First session</text>
+    <text x="576" y="80">Fresh session</text>
   </g>
-  <g fill="none" stroke="#f9c686" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M77 115h16v22H77zm4 6h8m-8 5h8m-8 5h5"/>
-    <path d="M366 118h18m-18 8h18m-18 8h12"/>
-    <path d="m655 135 3-9 13-12 5 6-13 12zm12-16 5 5"/>
-    <path d="m943 127 7 6 14-15"/>
+  <g fill="#121116" stroke="#55404a" stroke-width="2">
+    <rect x="34" y="103" width="510" height="250" rx="14"/>
+    <rect x="576" y="103" width="510" height="250" rx="14"/>
   </g>
-  <g fill="#f2e8de" font-family="Georgia,'Times New Roman',serif" font-size="29">
-    <text x="50" y="190">Run brief</text>
-    <text x="340" y="190">Stage contracts</text>
-    <text x="630" y="190">Editable outputs</text>
-    <text x="920" y="190">Review state</text>
-  </g>
-  <g fill="#c8b7ae" font-family="Arial,Helvetica,sans-serif" font-size="17">
-    <text x="51" y="222">The task and its limits</text>
-    <text x="341" y="222">Inputs, work and handoffs</text>
-    <text x="631" y="222">The files in progress</text>
-    <text x="921" y="222">The exact pending revision</text>
+  <path d="M50 159h478m64 0h478" stroke="#483a42" stroke-width="1.5"/>
+  <g font-family="Consolas,Menlo,'Liberation Mono',monospace" font-size="19" fill="#e4d4c8">
+    <g fill="#f8bf84" font-size="20">
+      <text x="53" y="139">$ anydock review budget-note</text>
+      <text x="595" y="139">$ anydock handoff budget-note</text>
+    </g>
+    <text x="53" y="195">Review budget-note | 01-work</text>
+    <text x="53" y="229">Hosting $180, hardware $260, total $440.</text>
+    <text x="53" y="268" fill="#fff2e4">Are these budget figures correct?</text>
+    <text x="595" y="195">Current 01-work | <tspan fill="#f8bf84">awaiting review</tspan></text>
+    <text x="595" y="229">Working file: …/outputs/summary.md</text>
+    <text x="595" y="268" fill="#fff2e4">Are these budget figures correct?</text>
+    <g fill="#f8bf84">
+      <text x="53" y="323">Revision: 390a3cb544b7…</text>
+      <text x="595" y="323">Revision: 390a3cb544b7…</text>
+    </g>
   </g>
 </svg>
