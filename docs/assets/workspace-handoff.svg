@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 265" width="1200" height="265" role="img" aria-labelledby="title description">
+  <title id="title">What a fresh agent can pick up</title>
+  <desc id="description">The same local workspace keeps the brief, stage contracts, editable outputs and exact review state between agent sessions.</desc>
+  <defs>
+    <linearGradient id="background" x2="1" y2="1"><stop stop-color="#1c1a1e"/><stop offset="1" stop-color="#101115"/></linearGradient>
+    <linearGradient id="line"><stop stop-color="#c77564"/><stop offset="1" stop-color="#f7c687"/></linearGradient>
+  </defs>
+  <rect x="1" y="1" width="1198" height="263" rx="23" fill="url(#background)" stroke="#383238" stroke-width="2"/>
+  <text x="49" y="59" fill="#f8eee4" font-family="Georgia,'Times New Roman',serif" font-size="38">What a fresh agent picks up</text>
+  <path d="M85 126h1016" stroke="url(#line)" stroke-width="2.5"/>
+  <g fill="#241f24" stroke="#edb778" stroke-width="2">
+    <rect x="63" y="104" width="44" height="44" rx="8"/>
+    <rect x="353" y="104" width="44" height="44" rx="8"/>
+    <rect x="643" y="104" width="44" height="44" rx="8"/>
+    <rect x="933" y="104" width="44" height="44" rx="8"/>
+    <path d="m1100 120 7 6-7 6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <g fill="none" stroke="#f9c686" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M77 115h16v22H77zm4 6h8m-8 5h8m-8 5h5"/>
+    <path d="M366 118h18m-18 8h18m-18 8h12"/>
+    <path d="m655 135 3-9 13-12 5 6-13 12zm12-16 5 5"/>
+    <path d="m943 127 7 6 14-15"/>
+  </g>
+  <g fill="#f2e8de" font-family="Georgia,'Times New Roman',serif" font-size="29">
+    <text x="50" y="190">Run brief</text>
+    <text x="340" y="190">Stage contracts</text>
+    <text x="630" y="190">Editable outputs</text>
+    <text x="920" y="190">Review state</text>
+  </g>
+  <g fill="#c8b7ae" font-family="Arial,Helvetica,sans-serif" font-size="17">
+    <text x="51" y="222">The task and its limits</text>
+    <text x="341" y="222">Inputs, work and handoffs</text>
+    <text x="631" y="222">The files in progress</text>
+    <text x="921" y="222">The exact pending revision</text>
+  </g>
+</svg>

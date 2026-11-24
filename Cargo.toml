@@ -1,0 +1,19 @@
+[package]
+name = "anydock"
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+getrandom = "0.4"
+csv = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+sha2 = "0.10"
+similar = "2"
+tempfile = "3"
