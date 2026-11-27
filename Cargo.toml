@@ -1,6 +1,6 @@
 [package]
 name = "anydock"
-version = "0.2.0"
+version = "0.2.1"
 description = "Local file-based workspaces with resumable runs and exact human review"
 readme = "README.md"
 repository = "https://github.com/skigsy/AnyDock"

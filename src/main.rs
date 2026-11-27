@@ -9,6 +9,7 @@ mod input_scope;
 mod learning;
 mod mcp;
 mod policy;
+mod portfolio;
 mod quality;
 mod queue;
 mod quick;
@@ -51,6 +52,13 @@ enum Command {
     /// Set up the current folder as an idle AnyDock workspace.
     #[command(display_order = 1)]
     Init,
+    /// Set up this project and teach new agent sessions the AnyDock workflow.
+    #[command(display_order = 2)]
+    Setup {
+        /// Configure projects directly inside this folder and future projects in the same folder.
+        #[arg(long)]
+        projects: bool,
+    },
     /// Verify workspace compatibility or bring an older local layout forward in place.
     #[command(display_order = 17)]
     Upgrade {
@@ -452,6 +460,8 @@ fn execute(cli: Cli) -> Result<()> {
     let start = cli.directory.map_or_else(std::env::current_dir, Ok)?;
     let command = match cli.command {
         Command::Init => return Workspace::init(&start),
+        Command::Setup { projects: true } => return portfolio::setup(&start),
+        Command::Setup { projects: false } => return Workspace::setup(&start),
         Command::Upgrade {
             check,
             from_marker,
@@ -476,7 +486,11 @@ fn dispatch(space: &Workspace, command: Command) -> Result<()> {
             remove_feed,
         } => daily::write(space, &feed, &add_feed, &remove_feed),
         Command::Queue { all, json, sources } => queue::show(space, all, json, sources),
-        Command::Init | Command::Upgrade { .. } | Command::Session | Command::Mcp { .. } => {
+        Command::Init
+        | Command::Setup { .. }
+        | Command::Upgrade { .. }
+        | Command::Session
+        | Command::Mcp { .. } => {
             unreachable!("handled by the CLI entry point")
         }
         Command::Transfer(transfer) => dispatch_transfer(space, transfer),

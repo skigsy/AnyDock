@@ -1,6 +1,22 @@
 # AnyDock
 
-This checkout is idle. Work on the user's request. Planning, discussion, and inspection stay read-only. Create or advance a run only with authorization. Maintenance of AnyDock itself is ordinary repository work.
+This workspace starts idle. Maintenance of the AnyDock source itself is ordinary repository work.
+
+<!-- anydock:workflow:start -->
+## AnyDock workflow
+
+When the user asks for project work that changes files, needs several steps, or will be resumed, handle the AnyDock record yourself. The project request authorizes that bookkeeping. Answer quick questions and isolated read-only checks directly.
+
+For project work, look for relevant skills in `.agents/skills/<name>/SKILL.md` and roles in `.agents/agents/<name>.md`, relative to the project root. If the immediate parent's `AGENTS.md` has an AnyDock projects block for this project, follow its shared library directions as well. Read descriptions first and open only the relevant definitions and references. Project definitions take precedence over shared definitions with the same name. Honor disabled entries and opt-in rules. Use role instructions within your existing authorization. Delegate only when the harness supports it and delegation is authorized.
+
+Run AnyDock in the project root, or use `-C .anydock-work` when that folder contains the workspace marker and the project root does not. Prefer a trusted installed `anydock` or the verified executable in the package's `bin` folder. If using the location recorded in `.anydock/executable`, verify that it points to a trusted local copy. With no CLI, use the agent-only workflow for new work. Keep existing managed runs intact and leave a continuation note until the CLI is available.
+
+Check `anydock status` and read `anydock handoff <run>` before resuming a matching run. For new work, choose a short run name and use `anydock run <name> --brief <task> --work <scope> --output handoff.md` or an existing workflow that fits. Keep project files in place. Use the active attempt to checkpoint when pausing. Record changes, verification, and the next step in the handoff, then complete the attempt after checks pass.
+
+If `.anydock-handoff.md` exists, read it before starting work. It may contain work verified in a session whose terminal could not write. When starting or resuming related managed work, carry forward the relevant context in the run handoff. With terminal writes blocked, keep permissions in place and use authorized native file tools. Keep that note private by adding `/.anydock-handoff.md` to `.gitignore` in a Git project before writing it.
+
+Follow the user's approval requirements and existing review gates. Routine bookkeeping needs no extra approval step. Stop the earlier writer before transferring an active run.
+<!-- anydock:workflow:end -->
 
 ## Start and resume
 

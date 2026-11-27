@@ -22,12 +22,32 @@ Tell the new session, **“Resume the budget review in this folder.”** It find
 
 ## One-prompt setup
 
-Open AnyDock in your agent and start with one file you already have.
+Open your project in your agent and say:
 
 ```text
-Use AnyDock to [your task] with [your file].
-Start now, write an editable draft, and stop for my review.
+Get AnyDock from https://github.com/skigsy/AnyDock/releases.
+Set up AnyDock in this project and use it for project work going forward.
+Start with [the work you want done].
 ```
+
+The agent finds the package for your platform, verifies it against the release checksum, and extracts it to a stable local folder. It runs `anydock -C <project> setup` using the verified executable. Setup preserves the existing project rules, adds the AnyDock workflow to `AGENTS.md`, and keeps the workspace idle until you give it work. If the agent uses a different startup filename, it connects that file to `AGENTS.md` during setup. If a project already uses a folder name AnyDock needs, setup keeps its records in `.anydock-work`.
+
+After setup, just describe the work. The agent picks up the current run or starts one, checkpoints when pausing, and records the verified handoff. Ask it to stop for review when you want to make a decision before work continues.
+
+### Set up a folder of projects
+
+Open the folder that contains your projects and say:
+
+```text
+Get AnyDock from https://github.com/skigsy/AnyDock/releases.
+Set it up for the projects in this folder and use it for new projects here too.
+```
+
+The agent runs `anydock -C <projects-folder> setup --projects` once. It configures existing project folders and adds a rule scoped to this folder in installed Codex and Antigravity profiles. When you ask one of those agents to work on a new project here, it handles setup on first use if it can run the CLI and write to the project. Every project has its own runs and review state. They share the same verified executable.
+
+If the terminal cannot write, an agent with native file-editing access can finish the task and leave a private handoff for the next session. The managed workspace can initialize when terminal writes are available.
+
+Projects share skills and agent roles from folders you own. Keep the definitions in the shared library or with the project and `AGENTS.md` tells the agent where to find them. Tell your agent what to do. It can read the relevant skill or role directly from the source. [Where skills and roles live](USAGE.md#skills-and-agent-roles).
 
 <details>
 <summary>Bring in an existing project, documents, skills, or agent definitions</summary>
@@ -38,7 +58,7 @@ Bring in [documents, projects, skills or agent definitions and their paths].
 
 Use the AnyDock folder I opened or the package I provide. Verify a release
 archive against its SHA-256 checksum before extracting it.
-For an existing project, run the packaged CLI with -C "<project folder>" init.
+For an existing project, run the packaged CLI with -C "<project folder>" setup.
 Read AGENTS.md and preserve any existing project instructions.
 
 Copy only the named material. Preserve originals unless I ask you to move
@@ -67,7 +87,7 @@ Your agent does the work. The Rust CLI owns the run transitions, so the same rul
 
 ## Get AnyDock
 
-[**Download the v0.2.0 source ZIP**](https://github.com/skigsy/AnyDock/archive/refs/tags/v0.2.0.zip) · [Release downloads](https://github.com/skigsy/AnyDock/releases)
+[**Release downloads**](https://github.com/skigsy/AnyDock/releases/latest) · [Source ZIP](https://github.com/skigsy/AnyDock/archive/refs/heads/main.zip)
 
 Extract the ZIP and open its root in an agent that can read and edit local files. It starts empty and idle. The source workspace runs in agent-only mode through [AGENTS.md](AGENTS.md). Use the Rust CLI for managed review gates and recovery.
 

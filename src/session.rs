@@ -61,6 +61,7 @@ fn run(space: &Workspace, args: Vec<String>) -> Result<()> {
             && !matches!(
                 cli.command,
                 Command::Init
+                    | Command::Setup { .. }
                     | Command::Upgrade { .. }
                     | Command::Session
                     | Command::Mcp { .. }

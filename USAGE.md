@@ -4,9 +4,24 @@
 
 ## Install in a new workspace
 
-Open the extracted `AnyDock-0.2.0/` folder for a blank workspace. To use an existing project, run the executable with `-C <project> init`. Initialization preserves the project's instructions and adapters. Ask your agent to read the AnyDock instructions from the extracted package when the project has its own instruction file.
+Open the extracted AnyDock folder for a blank workspace. To set up an existing project, ask your agent to run the verified executable with `-C <project> setup`. Setup adds the workflow to the project's `AGENTS.md` and preserves the existing text and adapters. Start a fresh session in that project when you want another agent to pick up the work.
 
 To use a newer binary with your existing workspace, run `anydock -C <workspace> upgrade --check`. A compatible workspace keeps its runs, workflow files, and approvals. For an earlier layout with a different `.version` marker, use `upgrade --check --from-marker <filename>` while the workspace is stopped. Use the same command without `--check` to publish the upgrade in place and preserve a verified sibling backup. Open that backup with the prior executable if you need to resume from the pre-upgrade state.
+
+## Skills and agent roles
+
+Keep the authored definitions with your files. AnyDock setup adds discovery instructions to `AGENTS.md`. An agent that reads those instructions and can access the files can use the definitions directly.
+
+| Scope | Skill package | Agent role |
+| --- | --- | --- |
+| Project | `.agents/skills/<name>/SKILL.md` | `.agents/agents/<name>.md` |
+| Shared library | `Skills/<name>/SKILL.md` | `Agents/<name>.md` |
+
+The projects folder is the default shared library root. If that folder is named `Projects` and has an existing `Skills` or `Agents` directory beside it, the shared library root is their common parent. This location is written relative to the projects folder in its `AGENTS.md`. Run setup again when you update an older onboarding installation or change the folder layout. You can add or edit a definition in the library without running setup again.
+
+Follow the [Agent Skills format](https://agentskills.io/specification) for skills. Keep references and scripts in the package and use relative paths within it. For an agent role, put its `name` and `description` in YAML frontmatter and write its scope, work instructions, and expected result in Markdown. Use project rules to record enablement or opt-in requirements that should apply across harnesses. Setup leaves existing native discovery and configuration in place.
+
+The Markdown role works in the current session or in an authorized delegate. Your harness supplies the model, subagent execution, tool access, hooks, and account connections. For tasks that depend on those capabilities, describe the prerequisites in the definition. An agent can read the relevant descriptions and load the matching files without loading the full library into every session.
 
 ## Managed runs
 
@@ -18,7 +33,9 @@ The Windows executable package includes `bin\anydock.exe`. The Linux x64 and mac
 
 - `anydock check` validates the workspace and its definitions. A blank checkout passes.
 - `anydock status` lists local runs without writing state. Add a run name for its next action, and `--diff` to preview unrecorded edits. Use `review <run>` to record and present the current revision, or `status <run> --reconcile` to record edits explicitly.
-- `anydock init` makes an existing project folder ready for managed work. It preserves a project’s `AGENTS.md` and existing ignore rules. If a managed folder name collides, initialize in a dedicated folder. Commands discover the nearest workspace from child folders. Use `anydock -C <directory> status` to select a different workspace.
+- `anydock setup` is the one-time project onboarding command. It configures agent startup instructions and records the current executable in the workspace's ignored `.anydock/executable` file. It reuses a workspace already configured in the project. If a reserved folder name is in use, it initializes `.anydock-work` and adds that path to the project's ignore file. Run setup again to refresh the executable location after moving a verified package.
+- `anydock -C <projects-folder> setup --projects` applies setup to immediate child folders with project instructions, a Git checkout, an AnyDock marker, or a supported package manifest. It skips hidden folders, archives, backups, and redirected directories. Each project keeps its own workspace. The command adds a scoped rule to the parent `AGENTS.md` and to standard Codex and Antigravity startup files when those profiles exist. In a fresh session, an agent sets up a new project under that folder when you first ask for substantive work and it has CLI and workspace access. If the terminal denies setup, the agent uses authorized native file tools to do the work and leave a private `.anydock-handoff.md`. The following session reads the note, and managed setup can resume when the terminal is writable. On another computer, run this setup with the local path and executable when you want the same defaults there.
+- `anydock init` prepares storage for a managed workspace and leaves existing project instructions byte-for-byte intact. Commands discover the nearest workspace from child folders. Use `anydock -C <directory> status` to select a workspace explicitly.
 - `anydock adopt <run>` registers an existing agent-only run when managed work is authorized. It keeps the brief, progress notes, stage contracts and output files. Existing files still need managed completion and any required review.
 - `anydock review <run>` shows the exact revision and a copyable approval command. `approve` accepts the full ID or the printed unique prefix. `reject <run> <stage> --revision <id> --note <text>` preserves the draft and opens rework. After the revised result is approved, `learn --from-rejection` can preview that feedback as reusable guidance.
 - Use `anydock review <run> --interactive` to preview and approve, reject, or skip in one terminal. A batch approval applies to every listed stage. A batch rejection asks which stage needs changes.

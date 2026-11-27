@@ -166,6 +166,79 @@ fn init_discovers_an_existing_project_without_replacing_its_files() {
 }
 
 #[test]
+fn setup_adds_reusable_defaults_without_replacing_project_rules() {
+    let space = Space(tempfile::tempdir().unwrap());
+    let original = "# Existing project\r\n\r\nRun the existing smoke checks.\r\n";
+    space.write("AGENTS.md", original);
+    space.write("CLAUDE.md", "Existing adapter\n");
+    space.ok(&["init"]);
+    assert_eq!(
+        fs::read_to_string(space.path("AGENTS.md")).unwrap(),
+        original
+    );
+
+    assert!(space.ok(&["setup"]).contains("project defaults ready"));
+    let updated = fs::read_to_string(space.path("AGENTS.md")).unwrap();
+    assert!(updated.starts_with(original));
+    assert!(updated.contains("\r\n## AnyDock workflow\r\n"));
+    assert_eq!(
+        updated.matches("<!-- anydock:workflow:start -->").count(),
+        1
+    );
+    let location = fs::read_to_string(space.path(".anydock/executable")).unwrap();
+    assert!(std::path::Path::new(location.trim()).is_file());
+    space.ok(&["setup"]);
+    assert_eq!(
+        fs::read_to_string(space.path("AGENTS.md")).unwrap(),
+        updated
+    );
+    assert_eq!(
+        fs::read_to_string(space.path("CLAUDE.md")).unwrap(),
+        "Existing adapter\n"
+    );
+    assert!(space.ok(&["status"]).contains("No runs"));
+}
+
+#[test]
+fn setup_keeps_conflicting_project_folders_in_place() {
+    let space = Space(tempfile::tempdir().unwrap());
+    space.write("runs/project-data.txt", "existing application data");
+    space.write(".gitignore", "private.txt");
+    for _ in 0..2 {
+        assert!(space.ok(&["setup"]).contains(".anydock-work"));
+        assert!(
+            space
+                .ok(&["-C", space.path(".anydock-work").to_str().unwrap(), "check"])
+                .contains("0 runs, 0 workflows")
+        );
+    }
+    assert!(!space.path("anydock.version").exists());
+    assert_eq!(
+        fs::read_to_string(space.path("runs/project-data.txt")).unwrap(),
+        "existing application data"
+    );
+    let rules = fs::read_to_string(space.path("AGENTS.md")).unwrap();
+    assert!(rules.contains("-C .anydock-work"));
+    let ignore = fs::read_to_string(space.path(".gitignore")).unwrap();
+    assert!(ignore.starts_with("private.txt\n"));
+    assert_eq!(ignore.matches("/.anydock-work/\n").count(), 1);
+}
+
+#[test]
+fn setup_rejects_incomplete_rules_without_initializing_the_project() {
+    let space = Space(tempfile::tempdir().unwrap());
+    let original = "# Project\n<!-- anydock:workflow:start -->\n";
+    space.write("AGENTS.md", original);
+    space.fails(&["setup"], "incomplete or duplicate AnyDock workflow block");
+    assert_eq!(
+        fs::read_to_string(space.path("AGENTS.md")).unwrap(),
+        original
+    );
+    assert!(!space.path("anydock.version").exists());
+    assert!(!space.path(".gitignore").exists());
+}
+
+#[test]
 fn interrupted_init_can_retry_without_leaving_workspace_metadata() {
     let space = Space(tempfile::tempdir().unwrap());
     space.write(".gitignore", "my-private.txt\n");

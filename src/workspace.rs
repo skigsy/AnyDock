@@ -16,6 +16,9 @@ pub const BRIEF: &str = "brief.md";
 pub const PROGRESS: &str = "progress.md";
 pub const VERSION_FILE: &str = "anydock.version";
 const LOCAL_FOLDERS: [&str; 5] = ["runs", "workflows", "inbox", "bundles", "briefs"];
+const SIDE_WORKSPACE: &str = ".anydock-work";
+const AGENT_RULES_START: &str = "<!-- anydock:workflow:start -->";
+const AGENT_RULES_END: &str = "<!-- anydock:workflow:end -->";
 
 pub struct Workspace {
     pub root: PathBuf,
@@ -184,7 +187,7 @@ impl Workspace {
         let mut installed_instructions = false;
         let instructions_bytes = include_bytes!("../AGENTS.md");
         let initialized = (|| {
-            installed_ignore = replace_ignore(&ignore, before.as_deref(), &after)?;
+            installed_ignore = replace_setup_file(&ignore, before.as_deref(), &after)?;
             if !instructions.try_exists()? {
                 write_new(&instructions, instructions_bytes)?;
                 installed_instructions = true;
@@ -199,7 +202,7 @@ impl Workspace {
                 }
                 if installed_ignore && fs::read(&ignore)? == after {
                     if let Some(before) = before.as_deref() {
-                        replace_ignore(&ignore, Some(&after), before)?;
+                        replace_setup_file(&ignore, Some(&after), before)?;
                     } else {
                         fs::remove_file(&ignore)?;
                     }
@@ -215,6 +218,42 @@ impl Workspace {
         }
         crate::storage::sync_dir(&root)?;
         println!("AnyDock initialized. The workspace is idle.");
+        Ok(())
+    }
+
+    pub fn setup(start: &Path) -> Result<()> {
+        let root = start.canonicalize()?;
+        ensure!(root.is_dir(), "expected a project directory");
+        let instructions = file(&root, "AGENTS.md")?;
+        let previous = optional(fs::read(&instructions))?;
+        // A malformed instructions block should fail before initializing anything.
+        agent_rules_contents(previous.as_deref())?;
+
+        let target = setup_workspace(&root)?;
+        Self::init(&target)?;
+        if target != root {
+            let ignore = file(&root, ".gitignore")?;
+            let previous = optional(fs::read(&ignore))?;
+            let pattern = format!("/{SIDE_WORKSPACE}/");
+            let updated = append_ignore_pattern(previous.as_deref(), &pattern);
+            replace_setup_file(&ignore, previous.as_deref(), &updated)?;
+        }
+
+        let meta = directory(&target, ".anydock")?;
+        fs::create_dir_all(&meta)?;
+        let executable = file(&meta, "executable")?;
+        let previous = optional(fs::read(&executable))?;
+        let location = format!("{}\n", display_native(&std::env::current_exe()?));
+        replace_setup_file(&executable, previous.as_deref(), location.as_bytes())?;
+
+        let previous = optional(fs::read(&instructions))?;
+        let updated = agent_rules_contents(previous.as_deref())?;
+        replace_setup_file(&instructions, previous.as_deref(), &updated)?;
+        crate::storage::sync_dir(&root)?;
+        println!(
+            "AnyDock project defaults ready. Workspace: {}",
+            display_native(&target)
+        );
         Ok(())
     }
 
@@ -286,7 +325,7 @@ pub fn shell_word(text: &str) -> String {
     }
 }
 
-fn display_native(path: &Path) -> String {
+pub(crate) fn display_native(path: &Path) -> String {
     let display = path.to_string_lossy();
     if let Some(tail) = display.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{tail}")
@@ -297,7 +336,7 @@ fn display_native(path: &Path) -> String {
 
 pub fn append_ignore(path: &Path) -> Result<()> {
     let previous = optional(fs::read(path))?;
-    replace_ignore(
+    replace_setup_file(
         path,
         previous.as_deref(),
         &ignore_contents(previous.as_deref()),
@@ -321,7 +360,92 @@ fn ignore_contents(previous: Option<&[u8]>) -> Vec<u8> {
     updated
 }
 
-fn replace_ignore(path: &Path, previous: Option<&[u8]>, updated: &[u8]) -> Result<bool> {
+fn setup_workspace(root: &Path) -> Result<PathBuf> {
+    if has_marker(root)? {
+        return Ok(root.to_owned());
+    }
+    let side = directory(root, SIDE_WORKSPACE)?;
+    let mut collision = false;
+    for name in LOCAL_FOLDERS {
+        collision |= optional(fs::symlink_metadata(root.join(name)))?.is_some();
+    }
+    if has_marker(&side)? {
+        return Ok(side);
+    }
+    if !collision {
+        return Ok(root.to_owned());
+    }
+    if let Some(mut entries) = optional(fs::read_dir(&side))? {
+        ensure!(
+            entries.next().is_none(),
+            "{} already contains data. Set up AnyDock in a separate folder.",
+            display_native(&side)
+        );
+    } else {
+        fs::create_dir_all(&side)?;
+    }
+    Ok(side)
+}
+
+fn agent_rules_contents(previous: Option<&[u8]>) -> Result<Vec<u8>> {
+    let bundled = include_str!("../AGENTS.md");
+    let (_, after) = bundled
+        .split_once(AGENT_RULES_START)
+        .context("missing bundled workflow")?;
+    let (body, _) = after
+        .split_once(AGENT_RULES_END)
+        .context("missing bundled workflow end")?;
+    let block = format!("{AGENT_RULES_START}{body}{AGENT_RULES_END}\n").replace("\r\n", "\n");
+    let mut updated = previous.unwrap_or_default().to_vec();
+    let existing =
+        std::str::from_utf8(&updated).context("AGENTS.md must be UTF-8 to add the workflow")?;
+    let start = existing
+        .match_indices(AGENT_RULES_START)
+        .collect::<Vec<_>>();
+    let end = existing.match_indices(AGENT_RULES_END).collect::<Vec<_>>();
+    match (start.as_slice(), end.as_slice()) {
+        ([(start, _)], [(end, _)]) if start < end => return Ok(updated),
+        ([], []) => {}
+        _ => bail!("AGENTS.md contains an incomplete or duplicate AnyDock workflow block"),
+    }
+    let newline = if existing.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    if !updated.is_empty() {
+        if !updated.ends_with(b"\n") {
+            updated.extend_from_slice(newline.as_bytes());
+        }
+        updated.extend_from_slice(newline.as_bytes());
+    }
+    updated.extend_from_slice(block.replace('\n', newline).as_bytes());
+    Ok(updated)
+}
+
+fn append_ignore_pattern(previous: Option<&[u8]>, pattern: &str) -> Vec<u8> {
+    let mut updated = previous.unwrap_or_default().to_vec();
+    let before_newline = updated.strip_suffix(b"\n").unwrap_or(&updated);
+    let last = before_newline
+        .rsplit(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    if last.strip_suffix(b"\r").unwrap_or(last) == pattern.as_bytes() {
+        return updated;
+    }
+    if !updated.is_empty() && !updated.ends_with(b"\n") {
+        updated.push(b'\n');
+    }
+    updated.extend_from_slice(pattern.as_bytes());
+    updated.push(b'\n');
+    updated
+}
+
+pub(crate) fn replace_setup_file(
+    path: &Path,
+    previous: Option<&[u8]>,
+    updated: &[u8],
+) -> Result<bool> {
     if let Some(previous) = previous {
         if updated == previous {
             return Ok(false);
@@ -332,11 +456,17 @@ fn replace_ignore(path: &Path, previous: Option<&[u8]>, updated: &[u8]) -> Resul
         pending.as_file().sync_all()?;
         ensure!(
             fs::read(path)? == previous,
-            ".gitignore changed during setup. Retry initialization"
+            "{} changed during setup. Retry initialization",
+            path.display()
         );
         crate::storage::persist_replace(pending, path)?;
     } else {
-        write_new(path, updated)?;
+        if let Err(error) = write_new(path, updated) {
+            if optional(fs::read(path))?.as_deref() == Some(updated) {
+                return Ok(false);
+            }
+            return Err(error);
+        }
     }
     Ok(true)
 }
@@ -470,7 +600,7 @@ fn checked(root: &Path, relative: &str, is_dir: bool) -> Result<PathBuf> {
     let mut parts = components.peekable();
     while let Some(part) = parts.next() {
         // This function also resolves fixed internal dot directories.
-        if !matches!(part, ".anydock" | ".gitignore" | "AGENTS.md") {
+        if !matches!(part, ".anydock" | ".gitignore" | "AGENTS.md") && relative != SIDE_WORKSPACE {
             input_component(part)?;
         }
         path.push(part);
