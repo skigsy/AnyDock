@@ -1,6 +1,12 @@
 # Review a budget note
 
-From an empty workspace containing your source file, use the installed CLI.
+Start with an AnyDock workspace and a file named `Q4 Budget (Final).md` containing a line of budget figures.
+
+```text
+Hosting $180, hardware $260.
+```
+
+Start the run with the installed CLI.
 
 ```powershell
 anydock run budget-note --brief "Summarize the two approved Q4 budget lines." --work "Report hosting, hardware, and the total in USD." --source "Q4 Budget (Final).md" --output summary.md --review "Are these budget figures correct?"
@@ -33,12 +39,12 @@ Review budget-note | 01-work
 Decision: Are these budget figures correct?
 Review full file: runs/budget-note/stages/01-work/outputs/summary.md
 Hosting $180, hardware $260, total $440.
-Revision: 5e3de310de14a8279e30b91c6daf31ebdc52d4ca04eef466cb254d24e598da54
+Revision: cb6d29caa067e899f7f94471353e13c055ceffc6bb37228fb814965403289261
 
 AnyDock handoff | budget-note | managed
 Current 01-work | awaiting review | runs/budget-note/stages/01-work/stage.md
 Human review: Are these budget figures correct?
-Revision: 5e3de310de14a8279e30b91c6daf31ebdc52d4ca04eef466cb254d24e598da54
+Revision: cb6d29caa067e899f7f94471353e13c055ceffc6bb37228fb814965403289261
 ```
 
 Use `review budget-note --interactive` to decide in your terminal. Each run generates its own revision.

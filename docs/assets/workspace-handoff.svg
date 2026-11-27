@@ -1,41 +1,39 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 388" width="1120" height="388" role="img" aria-labelledby="title description">
-  <title id="title">Resume the same AnyDock review in a fresh session</title>
-  <desc id="description">Two excerpts from the budget note run. Review presents a 440 dollar budget summary. Handoff recovers summary.md, the same pending decision, and the same revision.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="391" viewBox="0 0 960 391" role="img" aria-labelledby="title description">
+  <title id="title">Resume a budget review in a fresh session</title>
+  <desc id="description">Actual command excerpts show a budget review and a fresh session with the same question and revision, cb6d29ca.</desc>
   <defs>
-    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#241d24"/>
-      <stop offset="1" stop-color="#101115"/>
-    </linearGradient>
-    <linearGradient id="accent">
-      <stop stop-color="#bd7161"/>
-      <stop offset="1" stop-color="#f4c387"/>
+    <linearGradient id="bg" x2="1" y2="1">
+      <stop stop-color="#251e23"/>
+      <stop offset="1" stop-color="#141419"/>
     </linearGradient>
   </defs>
-  <rect x="1" y="1" width="1118" height="386" rx="24" fill="url(#background)" stroke="#42343b" stroke-width="2"/>
-  <path d="M34 29h1052" stroke="url(#accent)" stroke-width="2"/>
-  <g font-family="Georgia,'Times New Roman',serif" font-size="33" fill="#f9efe5">
-    <text x="34" y="80">First session</text>
-    <text x="576" y="80">Fresh session</text>
+  <rect x="1" y="1" width="958" height="389" rx="23" fill="url(#bg)" stroke="#4b3a41" stroke-width="2"/>
+  <g fill="#17161b" stroke="#66505a" stroke-width="2">
+    <rect x="29" y="28" width="902" height="147" rx="14"/>
+    <rect x="29" y="216" width="902" height="147" rx="14"/>
   </g>
-  <g fill="#121116" stroke="#55404a" stroke-width="2">
-    <rect x="34" y="103" width="510" height="250" rx="14"/>
-    <rect x="576" y="103" width="510" height="250" rx="14"/>
-  </g>
-  <path d="M50 159h478m64 0h478" stroke="#483a42" stroke-width="1.5"/>
-  <g font-family="Consolas,Menlo,'Liberation Mono',monospace" font-size="19" fill="#e4d4c8">
-    <g fill="#f8bf84" font-size="20">
-      <text x="53" y="139">$ anydock review budget-note</text>
-      <text x="595" y="139">$ anydock handoff budget-note</text>
+  <path d="M239 29v145m0 43v145" stroke="#58464e" stroke-width="2"/>
+  <path d="M480 177v35m-8-9 8 9 8-9" fill="none" stroke="#e5a372" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <g fill="#fff0e5" font-size="25" font-weight="700">
+      <text x="50" y="76">First session</text>
+      <text x="50" y="264">Fresh session</text>
     </g>
-    <text x="53" y="195">Review budget-note | 01-work</text>
-    <text x="53" y="229">Hosting $180, hardware $260, total $440.</text>
-    <text x="53" y="268" fill="#fff2e4">Are these budget figures correct?</text>
-    <text x="595" y="195">Current 01-work | <tspan fill="#f8bf84">awaiting review</tspan></text>
-    <text x="595" y="229">Working file: …/outputs/summary.md</text>
-    <text x="595" y="268" fill="#fff2e4">Are these budget figures correct?</text>
-    <g fill="#f8bf84">
-      <text x="53" y="323">Revision: 390a3cb544b7…</text>
-      <text x="595" y="323">Revision: 390a3cb544b7…</text>
+    <g fill="#d8c1b8" font-size="21">
+      <text x="50" y="112">Stops for review</text>
+      <text x="50" y="300">Resumes review</text>
+    </g>
+  </g>
+  <g font-family="Consolas, Menlo, Liberation Mono, monospace" font-size="25">
+    <g fill="#f5bc89">
+      <text x="263" y="68">$ anydock review budget-note</text>
+      <text x="263" y="256">$ anydock handoff budget-note</text>
+      <text x="263" y="144">Revision: cb6d29ca…</text>
+      <text x="263" y="332">Revision: cb6d29ca…</text>
+    </g>
+    <g fill="#fff1e7">
+      <text x="263" y="109">Are these budget figures correct?</text>
+      <text x="263" y="297">Are these budget figures correct?</text>
     </g>
   </g>
 </svg>

@@ -28,7 +28,8 @@ const product = {
     'LICENSE', 'Cargo.toml', 'Cargo.lock', 'THIRD_PARTY_NOTICES.md', 'anydock.version',
     '.cursor/rules/anydock.mdc', '.github/copilot-instructions.md', '.gemini/settings.json',
     '.github/workflows/ci.yml', '.github/workflows/release.yml',
-    'docs/example.md', 'docs/assets/anydock-banner.svg', 'docs/assets/workspace-handoff.svg',
+    'docs/example.md', 'docs/assets/anydock-banner.svg', 'docs/assets/project-layout.svg',
+    'docs/assets/workspace-handoff.svg',
     'tools/package-anydock.mjs', 'tools/assemble-release.mjs',
   ]),
 }

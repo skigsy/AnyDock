@@ -1,57 +1,39 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 356" width="1200" height="356" role="img" aria-labelledby="title description">
-  <title id="title">AnyDock</title>
-  <desc id="description">A charcoal and gold workspace graphic. Two agent terminals connect to the same central folder.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="296" viewBox="0 0 960 296" role="img" aria-labelledby="title description">
+  <title id="title">AnyDock keeps your place</title>
+  <desc id="description">An AnyDock project handoff shows the budget draft, the next step, and the decision waiting for review.</desc>
   <defs>
-    <linearGradient id="background" x2="1" y2="1">
-      <stop stop-color="#1b191c"/>
-      <stop offset="1" stop-color="#0f1014"/>
+    <linearGradient id="bg" x2="1" y2="1">
+      <stop stop-color="#2a2025"/>
+      <stop offset="1" stop-color="#121217"/>
     </linearGradient>
-    <linearGradient id="route" x2="1" y2="0">
-      <stop stop-color="#cf755d"/>
-      <stop offset="1" stop-color="#ffc97d"/>
-    </linearGradient>
-    <radialGradient id="light">
-      <stop stop-color="#f4b671" stop-opacity=".16"/>
-      <stop offset="1" stop-color="#f4b671" stop-opacity="0"/>
+    <radialGradient id="glow">
+      <stop stop-color="#d89e6d" stop-opacity=".17"/>
+      <stop offset="1" stop-color="#d89e6d" stop-opacity="0"/>
     </radialGradient>
     <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
-      <circle cx="1" cy="1" r="1" fill="#b9a39c" opacity=".21"/>
+      <circle cx="1" cy="1" r="1" fill="#b29b91" opacity=".28"/>
     </pattern>
   </defs>
-  <rect x="1" y="1" width="1198" height="354" rx="25" fill="url(#background)" stroke="#383238" stroke-width="2"/>
-  <rect x="653" y="24" width="523" height="308" rx="16" fill="url(#grid)"/>
-  <ellipse cx="915" cy="173" rx="251" ry="147" fill="url(#light)"/>
-  <path d="M653 53v250" stroke="#413638"/>
-  <g fill="none" stroke="#5c4747" opacity=".69">
-    <ellipse cx="915" cy="172" rx="219" ry="93" transform="rotate(-12 915 172)"/>
-    <ellipse cx="915" cy="172" rx="219" ry="93" transform="rotate(12 915 172)"/>
+  <rect x="1" y="1" width="958" height="294" rx="23" fill="url(#bg)" stroke="#4b3a41" stroke-width="2"/>
+  <rect x="456" y="24" width="480" height="248" rx="14" fill="url(#grid)"/>
+  <ellipse cx="659" cy="146" rx="255" ry="135" fill="url(#glow)"/>
+  <path d="M458 44v208M441 148h52m-16-15 16 15-16 15" fill="none" stroke="#95705f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="42" y="61" fill="#f0b986" font-size="19" font-weight="700" letter-spacing="2.6">LOCAL AI WORKSPACE</text>
+    <text x="40" y="151" fill="#fff2e6" font-family="Georgia, Times New Roman, serif" font-size="83" letter-spacing="-3">Any<tspan fill="#f5b87e">Dock</tspan></text>
+    <text x="44" y="211" fill="#f4e6dd" font-size="30">Pick up where you left off.</text>
+    <text x="45" y="249" fill="#cdbab2" font-size="23">One prompt to set it up.</text>
   </g>
-  <g fill="#251f24" stroke="#755655" stroke-width="2">
-    <circle cx="761" cy="100" r="5"/>
-    <circle cx="824" cy="254" r="5"/>
-    <circle cx="1032" cy="245" r="5"/>
-    <circle cx="1077" cy="101" r="5"/>
+  <rect x="509" y="45" width="404" height="206" rx="17" fill="#17161b" stroke="#886252" stroke-width="2"/>
+  <rect x="509" y="45" width="404" height="52" rx="17" fill="#2e2327"/>
+  <path d="M510 97h402" stroke="#62474a" stroke-width="2"/>
+  <path d="M537 66h12l5 5h13v13h-30z" fill="none" stroke="#f5b87e" stroke-width="2.5" stroke-linejoin="round"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="582" y="80" fill="#f6dfce" font-size="24" font-weight="700">Project handoff</text>
+    <text x="536" y="133" fill="#d1bdb4" font-size="23">Next step</text>
+    <text x="536" y="171" fill="#fff2e6" font-size="32" font-weight="700">Review the draft</text>
+    <text x="536" y="214" fill="#f5b87e" font-family="Consolas, Menlo, monospace" font-size="23">summary.md</text>
   </g>
-  <path d="M737 164h106l34 34h76l34-34h106" fill="none" stroke="#df955f" stroke-width="14" opacity=".13"/>
-  <path d="M737 164h106l34 34h76l34-34h106" fill="none" stroke="url(#route)" stroke-width="3.5" stroke-linecap="round"/>
-  <g fill="#211c21" stroke="url(#route)" stroke-width="2">
-    <rect x="709" y="141" width="54" height="46" rx="8"/>
-    <rect x="1067" y="141" width="54" height="46" rx="8"/>
-    <rect x="860" y="116" width="110" height="114" rx="20"/>
-  </g>
-  <g fill="none" stroke="#fac484" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round">
-    <path d="m720 157 7 7-7 7m12 0h14m331-14 7 7-7 7m12 0h14"/>
-    <path d="M881 154a6 6 0 0 1 6-6h18l8 8h29a6 6 0 0 1 6 6v32a6 6 0 0 1-6 6h-55a6 6 0 0 1-6-6zM900 177h29m-29 9h20"/>
-  </g>
-  <g fill="#dfc7b8" font-family="Arial,Helvetica,sans-serif" font-size="13" letter-spacing="1.9" text-anchor="middle">
-    <text x="736" y="219">AGENT A</text>
-    <text x="1094" y="219">AGENT B</text>
-    <text x="915" y="267" fill="#f8c382">SAME WORKSPACE</text>
-  </g>
-  <g font-family="Arial,Helvetica,sans-serif">
-    <text x="61" y="79" fill="#f8c382" font-size="14" letter-spacing="3.4">LOCAL AI WORKSPACE</text>
-    <text x="62" y="251" fill="#dfd2c8" font-size="23">Start with one prompt.</text>
-    <text x="62" y="282" fill="#bfb0a7" font-size="20">Keep your work when you change agents.</text>
-  </g>
-  <text x="55" y="193" fill="#f9f1e7" font-family="Georgia,'Times New Roman',serif" font-size="111" letter-spacing="-4">Any<tspan dx="-4" fill="none" stroke="#ecae73" stroke-width="1.75">Dock</tspan></text>
+  <circle cx="865" cy="203" r="18" fill="#46312c" stroke="#a77a61" stroke-width="2"/>
+  <path d="M865 194v10m0 6v1" stroke="#ffcb9a" stroke-width="2.5" stroke-linecap="round"/>
 </svg>
