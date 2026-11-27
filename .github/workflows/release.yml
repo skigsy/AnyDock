@@ -2,18 +2,31 @@ name: Release
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: read
 
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
 jobs:
   license:
     runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          ref: ${{ format('refs/tags/{0}', env.RELEASE_TAG) }}
       - name: Check release license and tag
+        id: release
         shell: bash
         run: |
           if ! test -s LICENSE || ! grep -Eq '^license = "(MIT|Apache-2\.0)"$' Cargo.toml; then
@@ -21,11 +34,15 @@ jobs:
             exit 1
           fi
           version=$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' Cargo.toml)
-          test "$GITHUB_REF_NAME" = "v$version"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$RELEASE_TAG" = "v$version"
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   checks:
     needs: license
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.license.outputs.commit }}
 
   packages:
     needs: [license, checks]
@@ -45,13 +62,22 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ needs.license.outputs.commit }}
       - run: rustup toolchain install stable --profile minimal
+      - name: Select native Windows tar
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tar = Get-Item -LiteralPath (Join-Path $env:SystemRoot 'System32/tar.exe')
+          "ANYDOCK_TAR=$($tar.FullName)" >> $env:GITHUB_ENV
       - name: Build and verify tagged archive
         shell: bash
         env:
-          ANYDOCK_RELEASE_TAG: ${{ github.ref_name }}
+          ANYDOCK_RELEASE_TAG: ${{ env.RELEASE_TAG }}
           RUSTUP_TOOLCHAIN: stable
-        run: node tools/package-anydock.mjs "${RUNNER_TEMP}/anydock-release" "$GITHUB_SHA"
+        run: |
+          mkdir -p "${CARGO_HOME:-$HOME/.cargo}"
+          node tools/package-anydock.mjs "${RUNNER_TEMP}/anydock-release" "$(git rev-parse HEAD)"
       - uses: actions/upload-artifact@v7
         with:
           name: package-${{ matrix.target }}
@@ -59,7 +85,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: packages
+    needs: [license, packages]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -68,15 +94,16 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ needs.license.outputs.commit }}
       - uses: actions/download-artifact@v8
         with:
           pattern: package-*
           path: ${{ runner.temp }}/packages/
       - name: Assemble exact release assets
         shell: bash
-        run: node tools/assemble-release.mjs "$GITHUB_REF_NAME" "$RUNNER_TEMP/packages" "$RUNNER_TEMP/release"
+        run: node tools/assemble-release.mjs "$RELEASE_TAG" "$RUNNER_TEMP/packages" "$RUNNER_TEMP/release"
       - name: Publish tagged assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP"/release/* --verify-tag --title "AnyDock $GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$RELEASE_TAG" "$RUNNER_TEMP"/release/* --verify-tag --title "AnyDock $RELEASE_TAG" --generate-notes
